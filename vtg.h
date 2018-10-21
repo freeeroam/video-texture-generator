@@ -34,6 +34,8 @@ enum similarity_measure : unsigned int
 }; // enum similarity_measures
 
 // Global function declarations
+bool check_flags(int argc, char ** argv);
+void apply_preprocessing(Video & video);
 std::vector <std::vector <double>> * distance_matrix(Video & video);
 template <class T>
 std::vector <std::vector <T>> * create_square_matrix(unsigned int size,
@@ -52,3 +54,7 @@ void print_matrix(std::vector <std::vector <T>> & matrix);
 Video * load_video(std::string file_name);
 void write_video(Video & video, std::string & file_name);
 void on_event(int event, int x, int y,int flags, void * userdata);
+void equalise_video_brightness(Video & video, cv::Mat & reference);
+double average_luminance(cv::Mat & image);
+cv::Mat find_reference_image(Video & video, int num_portions);
+double standard_deviation(std::vector <double> values, double mean);
