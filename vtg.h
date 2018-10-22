@@ -44,9 +44,14 @@ double calculate_distance(cv::Mat & frame_a, cv::Mat & frame_b);
 std::vector <std::vector <double>> * probability_matrix(
   std::vector <std::vector <double>> & distance_matrix, double sigma);
 double average_distance(std::vector <std::vector <double>> & matrix);
-void display_matrix(std::vector <std::vector <double>> & matrix);
+void display_binary_matrix(std::vector <std::vector <double>> & matrix);
+cv::Mat * enlarge_matrix(cv::Mat & matrix);
+void display_distance_matrix(std::vector <std::vector <double>> & dist_matrix);
+void display_transition_matrix(
+  std::vector <std::vector <double>> & prob_matrix);
 cv::Mat * threshold_matrix(std::vector <std::vector <double>> & matrix,
                          double threshold);
+cv::Mat * heat_map(std::vector <std::vector <double>> & dist_matrix);
 double calculate_threshold(std::vector <std::vector <double>> & matrix);
 void normalise_probabilities(std::vector <std::vector <double>> & matrix);
 template <class T>
@@ -58,3 +63,5 @@ void equalise_video_brightness(Video & video, cv::Mat & reference);
 double average_luminance(cv::Mat & image);
 cv::Mat find_reference_image(Video & video, int num_portions);
 double standard_deviation(std::vector <double> values, double mean);
+template <class T>
+T maximum_component_value(std::vector <std::vector <T>> & matrix);

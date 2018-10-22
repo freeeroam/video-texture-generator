@@ -29,9 +29,10 @@ int main(int argc, char ** argv)
   std::vector <std::vector <double>> * distances =
     distance_matrix(*input_video);
   std::vector <std::vector <double>> * probabilities =
-    probability_matrix(*distances, 5 * average_distance(*distances));
+    probability_matrix(*distances, 50 * average_distance(*distances));
   normalise_probabilities(*probabilities);
-  display_matrix(*probabilities);
+  display_transition_matrix(*probabilities);
+  //display_distance_matrix(*distances);
 
   return 0;
 } // function main
@@ -71,10 +72,18 @@ bool check_flags(int argc, char ** argv)
         {
           stabilise = true;
         } else if (argv[arg_index][char_index] == 'm'
+                   && char_index == strlen(argv[arg_index]) - 1
                    && argc > arg_index)
         {
           arg_index++;
-          min_matrix_display_size = std::stoi(argv[arg_index]);
+          try
+          {
+            min_matrix_display_size = std::stoi(argv[arg_index]);
+          } catch (...)
+          {
+            std::cout << "Incorrect use of arguments" << std::endl;
+            return false;
+          } // catch
         } // else if
       } // for
     } else
@@ -90,7 +99,7 @@ void apply_preprocessing(Video & video)
 {
   if (equalise_brightness)
   {
-    cv::Mat reference_image = find_reference_image(*input_video, 6);
+    cv::Mat reference_image = find_reference_image(*input_video, 4);
     equalise_video_brightness(video, reference_image);
   } // if
 
@@ -231,8 +240,9 @@ double average_distance(std::vector <std::vector <double>> & matrix)
   return total / number_nonzeros;
 } // function average_distance
 
-// Displays the given matrix in a window after thresholding it
-void display_matrix(std::vector <std::vector <double>> & matrix)
+// Creates a binary image by thresholding the given matrix and then
+// displays it in a new window.
+void display_binary_matrix(std::vector <std::vector <double>> & matrix)
 {
   std::cout << "Displaying matrix..." << std::endl; // output for debugging
   cv::Mat * binary_mat = threshold_matrix(matrix, calculate_threshold(matrix));
@@ -283,7 +293,81 @@ void display_matrix(std::vector <std::vector <double>> & matrix)
   cv::setMouseCallback("Display", on_event, nullptr);
   cv::imshow("Display", image);
   cv::waitKey(0);
-} // function display_matrix
+} // function display_binary_matrix
+
+// Enlarges the given square matrix to a size greater than the given global
+// minimum
+cv::Mat * enlarge_matrix(cv::Mat & matrix)
+{
+  int component_length = 1;
+  while (component_length * matrix.rows < min_matrix_display_size)
+  {
+    component_length++;
+  } // while
+
+  cv::Mat * image = new cv::Mat(matrix.rows * component_length,
+                                matrix.cols * component_length,
+                                CV_8U);
+  for (int row_index = 0; row_index < matrix.rows; row_index++)
+  {
+    for (int pix_index = 0; pix_index < matrix.cols; pix_index++)
+    {
+      for (int com_row_index = 0; com_row_index < component_length;
+           com_row_index++)
+      {
+        for (int com_col_index = 0; com_col_index < component_length;
+             com_col_index++)
+        {
+          image->at <uchar> (row_index * component_length + com_row_index,
+                             pix_index * component_length + com_col_index) =
+            matrix.at <uchar> (row_index, pix_index);
+        } // for
+      } // for
+    } // for
+  } // for
+  return image;
+} // function enlarge_matrix
+
+// Displays a heat map representation of the given distance matrix
+void display_distance_matrix(std::vector <std::vector <double>> & dist_matrix)
+{
+  std::cout << "Displaying distance matrix..." << std::endl;
+
+  cv::Mat * image = heat_map(dist_matrix);
+  image = enlarge_matrix(*image);
+  cv::namedWindow("Display", cv::WINDOW_AUTOSIZE);
+  cv::setMouseCallback("Display", on_event, nullptr);
+  cv::imshow("Display", *image);
+  cv::waitKey(0);
+} // function display_distance_matrix
+
+// Displays a heat map representation of a given stochastic/probability matrix
+void display_transition_matrix(
+  std::vector <std::vector <double>> & prob_matrix)
+{
+  std::cout << "Displaying transition matrix..." << std::endl;
+
+  double maximum_prob = maximum_component_value <double> (prob_matrix);
+
+  cv::Mat image (prob_matrix.size(), prob_matrix.size(), CV_8U,
+                 cv::Scalar::all(0));
+  uchar * image_row = nullptr;
+  for (int row_index = 0; row_index < prob_matrix.size(); row_index++)
+  {
+    image_row = image.ptr <uchar> (row_index);
+    for (int col_index = 0; col_index < prob_matrix.size(); col_index++)
+    {
+      image_row[col_index] =
+        (prob_matrix[row_index][col_index] / maximum_prob) * 255;
+    } // for
+  } // for
+
+  cv::Mat * output = enlarge_matrix(image);
+  cv::namedWindow("Display", cv::WINDOW_AUTOSIZE);
+  cv::setMouseCallback("Display", on_event, nullptr);
+  cv::imshow("Display", *output);
+  cv::waitKey(0);
+} // function display_transition matrix
 
 // Returns a "binary" Mat object with components set to 0 if their
 // corresponding components in the original matrix are greater than the given
@@ -293,7 +377,7 @@ cv::Mat * threshold_matrix(std::vector <std::vector <double>> & matrix,
 {
   cv::Mat * output = new cv::Mat(matrix.size(), matrix.size(), CV_8U,
                                  cv::Scalar::all(255));
-  uchar * output_row;
+  uchar * output_row = nullptr;
   for (int row_index = 0; row_index < matrix.size(); row_index++)
   {
     output_row = output->ptr <uchar> (row_index);
@@ -307,6 +391,27 @@ cv::Mat * threshold_matrix(std::vector <std::vector <double>> & matrix,
   } // for
   return output;
 } // function threshold_matrix
+
+// Returns a "heat map" representation of a given probability matrix.
+cv::Mat * heat_map(std::vector <std::vector <double>> & dist_matrix)
+{
+  cv::Mat * heat_map = new cv::Mat(dist_matrix.size(), dist_matrix.size(),
+                                   CV_8U, cv::Scalar::all(255));
+  double max_distance = maximum_component_value <double> (dist_matrix);
+
+  // Assign colour based on distance as a percentage of the maximum
+  uchar * output_row = nullptr;
+  for (int row_index = 0; row_index < dist_matrix.size(); row_index++)
+  {
+    output_row = heat_map->ptr <uchar> (row_index);
+    for (int col_index = 0; col_index < dist_matrix.size(); col_index++)
+    {
+      output_row[col_index] =
+        (dist_matrix[row_index][col_index] / max_distance) * 255;
+    } // for
+  } // for
+  return heat_map;
+} // function heat_map
 
 // Given a probability matrix, normalises it so the probabilities on each
 // row add up to 1
@@ -452,9 +557,7 @@ void equalise_video_brightness(Video & video, cv::Mat & reference)
            pix_index < video.get_frame_width() * ycrcb_frame.channels();
            pix_index += 3)
       {
-        //std::cout << "old: " << (int)row[pix_index]; // output for debugging
         row[pix_index] = std::floor(row[pix_index] * scale);
-        //std::cout << ", new: " << (int)row[pix_index] << std::endl; // output for debugging
       } // for
     } // for
 
@@ -552,12 +655,6 @@ cv::Mat find_reference_image(Video & video, int num_portions)
     deviation = std::abs(standard_deviation(lum_averages[por_index],
                                             portion_means[por_index]));
 
-    std::cout << "Portion " << por_index << ": rows = "
-              << row_range[0] << " to " << row_range[1] << ", cols = "
-              << col_range[0] << " to " << col_range[1] << ", mean = "
-              << portion_means[por_index] << ", deviation = "
-              << deviation << std::endl; // output for debugging
-
     if (deviation < min_deviation)
     {
       min_deviation = deviation;
@@ -593,3 +690,21 @@ double standard_deviation(std::vector <double> values, double mean)
   } // for
   return std::sqrt(total / (values.size() - 1));
 } // function standard_deviaion
+
+// Finds and returns the maximum component value of the given matrix
+template <class T>
+T maximum_component_value(std::vector <std::vector <T>> & matrix)
+{
+  T maximum = 0;
+  for (int row_index = 0; row_index < matrix.size(); row_index++)
+  {
+    for (int col_index = 0; col_index < matrix[0].size(); col_index++)
+    {
+      if (matrix[row_index][col_index] > maximum)
+      {
+        maximum = matrix[row_index][col_index];
+      } // if
+    } // for
+  } // for
+  return maximum;
+} // function
