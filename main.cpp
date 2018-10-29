@@ -2,12 +2,19 @@
 #include <iostream>
 #include <iterator>
 #include <cmath>
+#include <sstream>
 
 enum similarity_measure sim_measure = rgb;
 Video * input_video = nullptr;
 bool equalise_brightness = false;
 bool stabilise = false;
+int tap_filter = 0;
+bool anticipate_future_cost = false;
+double multiple_trans_tradeoff = 0.5;
+double relative_weight_future_trans = 0.99;
 int min_matrix_display_size = 500;
+
+extern bool stabilise_video(cv::VideoCapture & cap);
 
 int main(int argc, char ** argv)
 {
@@ -28,11 +35,23 @@ int main(int argc, char ** argv)
   apply_preprocessing(*input_video);
   std::vector <std::vector <double>> * distances =
     distance_matrix(*input_video);
+
+  if (tap_filter > 0)
+  {
+    std::vector <double> * weights = filter_weights(tap_filter * 2);
+    distances = preserve_dynamics(*distances, *weights);
+  } // if
+
+  if (anticipate_future_cost)
+  {
+    distances = anticipate_future(*distances);
+  } // if
+
   std::vector <std::vector <double>> * probabilities =
-    probability_matrix(*distances, 50 * average_distance(*distances));
+    probability_matrix(*distances, 3 * average_distance(*distances));
   normalise_probabilities(*probabilities);
-  display_transition_matrix(*probabilities);
-  //display_distance_matrix(*distances);
+  //display_transition_matrix(*probabilities);
+  display_distance_matrix(*distances);
 
   return 0;
 } // function main
@@ -46,7 +65,11 @@ bool check_flags(int argc, char ** argv)
     std::cout << "No input file provided" << std::endl;
     std::cout << "Correct usage: ./vtg filepath" << std::endl;
     return false;
-  } // if
+  } else if (strcmp(argv[1], "--help") == 0)
+  {
+    display_help();
+    return false;
+  } // else if
 
   for (int arg_index = 2; arg_index < argc; arg_index++)
   {
@@ -62,23 +85,103 @@ bool check_flags(int argc, char ** argv)
       for (int char_index = 1; char_index < strlen(argv[arg_index]);
            char_index++)
       {
-        if (argv[arg_index][char_index] == 'l')
+        if (argv[arg_index][char_index] == 'l') // use luminance as measure
         {
           sim_measure = luminance;
-        } else if (argv[arg_index][char_index] == 'b')
+        } else if (argv[arg_index][char_index] == 'b') // equalise brightness
         {
           equalise_brightness = true;
-        } else if (argv[arg_index][char_index] == 's')
+        } else if (argv[arg_index][char_index] == 's') // stabilise first
         {
           stabilise = true;
         } else if (argv[arg_index][char_index] == 'm'
                    && char_index == strlen(argv[arg_index]) - 1
-                   && argc > arg_index)
+                   && argc > arg_index) // set matrix display size
         {
           arg_index++;
           try
           {
-            min_matrix_display_size = std::stoi(argv[arg_index]);
+            if (std::stoi(argv[arg_index]) > 0)
+            {
+              min_matrix_display_size = std::stoi(argv[arg_index]);
+            } else
+            {
+              std::cout << "Incorrect use of arguments" << std::endl;
+              std::cout << "Matrix size must be a positive integer"
+                        << std::endl;
+            } // else
+          } catch (...)
+          {
+            std::cout << "Incorrect use of arguments" << std::endl;
+            return false;
+          } // catch
+        } else if (argv[arg_index][char_index] == 'f'
+                   && char_index == strlen(argv[arg_index]) - 1
+                   && argc > arg_index) // set tap filter number
+        {
+          arg_index++;
+          try
+          {
+            if (std::stoi(argv[arg_index]) > 0)
+            {
+              tap_filter = std::stoi(argv[arg_index]);
+            } else
+            {
+              std::cout << "Incorrect use of arguments" << std::endl;
+              std::cout << "Tap- number for filter must be a positive integer"
+                        << std::endl;
+              return false;
+            } // else
+          } catch (...)
+          {
+            std::cout << "Incorrect use of arguments" << std::endl;
+            return false;
+          } // catch
+        } else if (argv[arg_index][char_index] == 'a') // anticipate future
+        {
+          anticipate_future_cost = true;
+        } else if (argv[arg_index][char_index] == 'r'
+                   && char_index == strlen(argv[arg_index]) - 1
+                   && argc > arg_index) // set relative weight
+        {
+          arg_index++;
+          try
+          {
+            if (s_to_doub(argv[arg_index]) > 0
+                && s_to_doub(argv[arg_index]) < 1)
+            {
+              relative_weight_future_trans = s_to_doub(argv[arg_index]);
+            } else
+            {
+              std::cout << "Incorrect use of arguments" << std::endl
+                        << "Relative weight of future transitions must be "
+                        << "a numerical value between 0 and 1"
+                        << std::endl;
+              return false;
+            } // else
+          } catch (...)
+          {
+            std::cout << "Incorrect use of arguments" << std::endl;
+            return false;
+          } // catch
+        } else if (argv[arg_index][char_index] == 't'
+                   && char_index == strlen(argv[arg_index]) - 1
+                   && argc > arg_index) // set tradeoff between taking multiple
+        { // good low-cost transitions versus a single, poorer one
+          arg_index++;
+          try
+          {
+            if (s_to_doub(argv[arg_index]) > 0)
+            {
+              multiple_trans_tradeoff = s_to_doub(argv[arg_index]);
+            } else
+            {
+              std::cout << "Incorrect use of arguments" << std::endl
+                        << "Tradeoff between taking multiple low-cost "
+                        << "transitions vs. a single poorer one must be "
+                        << "a numerical value greater than 0" << std::endl;
+              return false;
+            } // else
           } catch (...)
           {
             std::cout << "Incorrect use of arguments" << std::endl;
@@ -95,16 +198,13 @@ bool check_flags(int argc, char ** argv)
   return true;
 } // function check_flags
 
+// Applies enabled preprocessing methods to the given video
 void apply_preprocessing(Video & video)
 {
   if (equalise_brightness)
   {
     cv::Mat reference_image = find_reference_image(*input_video, 4);
     equalise_video_brightness(video, reference_image);
-  } // if
-
-  if (stabilise)
-  {
   } // if
 } // function apply_preprocessing
 
@@ -348,6 +448,7 @@ void display_transition_matrix(
   std::cout << "Displaying transition matrix..." << std::endl;
 
   double maximum_prob = maximum_component_value <double> (prob_matrix);
+  double minimum_prob = minimum_component_value <double> (prob_matrix, false);
 
   cv::Mat image (prob_matrix.size(), prob_matrix.size(), CV_8U,
                  cv::Scalar::all(0));
@@ -357,8 +458,9 @@ void display_transition_matrix(
     image_row = image.ptr <uchar> (row_index);
     for (int col_index = 0; col_index < prob_matrix.size(); col_index++)
     {
-      image_row[col_index] =
-        (prob_matrix[row_index][col_index] / maximum_prob) * 255;
+      image_row[col_index] = 255
+        * ((prob_matrix[row_index][col_index] - minimum_prob)
+           / (maximum_prob - minimum_prob));
     } // for
   } // for
 
@@ -398,6 +500,7 @@ cv::Mat * heat_map(std::vector <std::vector <double>> & dist_matrix)
   cv::Mat * heat_map = new cv::Mat(dist_matrix.size(), dist_matrix.size(),
                                    CV_8U, cv::Scalar::all(255));
   double max_distance = maximum_component_value <double> (dist_matrix);
+  double min_distance = minimum_component_value <double> (dist_matrix, false);
 
   // Assign colour based on distance as a percentage of the maximum
   uchar * output_row = nullptr;
@@ -407,7 +510,8 @@ cv::Mat * heat_map(std::vector <std::vector <double>> & dist_matrix)
     for (int col_index = 0; col_index < dist_matrix.size(); col_index++)
     {
       output_row[col_index] =
-        (dist_matrix[row_index][col_index] / max_distance) * 255;
+        ((dist_matrix[row_index][col_index] - min_distance)
+         / (max_distance - min_distance)) * 255;
     } // for
   } // for
   return heat_map;
@@ -471,7 +575,11 @@ Video * load_video(std::string file_name)
   if (!capture.isOpened())
   {
     return nullptr;
-  } // if
+  } else if (stabilise && !stabilise_video(capture))
+  {
+    std::cout << "A problem occured while stabilising the video." << std::endl;
+    return nullptr;
+  } // else if
 
   std::cout << "Inputting frames from video..." << std::endl; // output for debug
 
@@ -520,17 +628,19 @@ void on_event(int event, int x, int y,int flags, void * userdata)
   } // while
 
   if (event == cv::EVENT_LBUTTONDOWN
-      && x < input_video->get_frames().size() * component_length
-      && y + 1 < input_video->get_frames().size() * component_length)
+      && x < (input_video->get_frames().size() - tap_filter) * component_length
+      && y + 1 < (input_video->get_frames().size() - tap_filter) * component_length)
   {
 
-    cv::namedWindow("FirstFrame", cv::WINDOW_AUTOSIZE);
-    cv::moveWindow("FirstFrame", 0, 0);
-    cv::imshow("FirstFrame", input_video->get_frames()[y / component_length]);
+    cv::namedWindow("Source", cv::WINDOW_AUTOSIZE);
+    cv::moveWindow("Source", 0, 0);
+    cv::imshow("Source",
+               input_video->get_frames()[y / component_length + tap_filter]);
 
-    cv::namedWindow("SecondFrame", cv::WINDOW_AUTOSIZE);
-    cv::moveWindow("SecondFrame", input_video->get_frame_width() + 3, 0);
-    cv::imshow("SecondFrame", input_video->get_frames()[x / component_length]);
+    cv::namedWindow("Destination", cv::WINDOW_AUTOSIZE);
+    cv::moveWindow("Destination", input_video->get_frame_width() + 3, 0);
+    cv::imshow("Destination",
+               input_video->get_frames()[x / component_length + tap_filter]);
   } // if
 } // function on_mouse_click
 
@@ -707,4 +817,190 @@ T maximum_component_value(std::vector <std::vector <T>> & matrix)
     } // for
   } // for
   return maximum;
-} // function
+} // function maximum_component_value
+
+// Finds and returns the minimum component value of the given matrix
+template <class T>
+T minimum_component_value(std::vector <std::vector <T>> & matrix,
+                          bool non_zero)
+{
+  T minimum = 10000000;
+  for (int row_index = 0; row_index < matrix.size(); row_index++)
+  {
+    for (int col_index = 0; col_index < matrix[0].size(); col_index++)
+    {
+      if ((!non_zero || matrix[row_index][col_index] > 0)
+          && matrix[row_index][col_index] < minimum)
+      {
+        minimum = matrix[row_index][col_index];
+      } // if
+    } // for
+  } // for
+  return minimum;
+} // function minimum_component_value
+
+// Filters the given distance matrix with a diagonal kernel with weights and
+// returns a filtered distance matrix
+std::vector <std::vector <double>> * preserve_dynamics(
+  std::vector <std::vector <double>> & matrix, std::vector <double> & weights)
+{
+  std::cout << "Filtering distance matrix to preserve dynamics..."
+            << std::endl; // output for debugging
+
+  int m = weights.size() / 2;
+  std::vector <std::vector <double>> * filtered_matrix =
+    new std::vector <std::vector <double>> (
+      matrix.size() - (m + 1), std::vector <double> (matrix.size()
+                                                     - (m + 1), 255));
+  double total = 0;
+  int fil_row_index = 0;
+  int fil_col_index = 0;
+  for (int row_index = 0; row_index < matrix.size(); row_index++)
+  {
+    for (int col_index = 0; col_index < matrix.size(); col_index++)
+    {
+      total = 0;
+      // set correct index values for filtered matrix
+      if (row_index == m && col_index == m) // initialise
+      {
+        fil_row_index = 0;
+        fil_col_index = 0;
+      } else if (fil_col_index + 1 < filtered_matrix->size()) // next column
+      {
+        fil_col_index++;
+      } else if (fil_row_index + 1 < filtered_matrix->size()) // next row
+      {
+        fil_row_index++;
+        fil_col_index = 0;
+      } else
+      {
+        row_index = matrix.size();
+        break;
+      } // else
+
+      for (int filter_index = -m; filter_index <= m - 1; filter_index++)
+      {
+        if (row_index + filter_index < matrix.size()
+            && col_index + filter_index < matrix.size())
+        {
+          total += weights[filter_index + m]
+            * matrix[row_index + filter_index][col_index + filter_index];
+        } // if
+      } // for
+      (*filtered_matrix)[fil_row_index][fil_col_index] = total;
+    } // for
+  } // for
+  return filtered_matrix;
+} // function preserve_dynamics
+
+// Returns a vector consisting of binomial weights to be used as a kernel
+std::vector <double> * filter_weights(int num_weights)
+{
+  std::vector <double> * weights = new std::vector <double> (num_weights);
+  for (int index = 0; index < num_weights; index++)
+  {
+    (*weights)[index] = (double) factorial(num_weights)
+      / (factorial(index) * factorial(num_weights - index));
+  } // for
+  return weights;
+} // function filter_weights
+
+// Utility function for calculating the factorial of a given integer
+unsigned int factorial(unsigned int n)
+{
+  return n == 0 ? 1 : n * factorial(n - 1);
+} // function factorial
+
+// Calculates the anticipated future cost of a transition from each frame to
+// each other frame
+std::vector <std::vector <double>> * anticipate_future(
+  std::vector <std::vector <double>> & dist_matrix)
+{
+  std::cout << "Anticipating future costs of transitions..." << std::endl; // output for debugging
+
+  std::vector <std::vector <double>> * cost_matrix =
+    new std::vector <std::vector <double>> (
+      dist_matrix.size(), std::vector <double> (dist_matrix.size()));
+
+  // Initialise anticipated cost matrix
+  for (int row_index = 0; row_index < dist_matrix.size(); row_index++)
+  {
+    for (int col_index = 0; col_index < dist_matrix.size(); col_index++)
+    {
+      (*cost_matrix)[row_index][col_index] =
+        std::pow(dist_matrix[row_index][col_index], multiple_trans_tradeoff);
+    } // for
+  } // for
+
+
+  // Repeatedly iterate from the last row to the first and compute anticipated
+  // costs until the matrix stabilises
+  bool changed = false;
+  double new_value = 0;
+  do
+  {
+    changed = false;
+    for (int row_index = dist_matrix.size() - 1; row_index >= 0; row_index--)
+    {
+      for (int col_index = 0; col_index < dist_matrix.size(); col_index++)
+      {
+        new_value = std::pow(dist_matrix[row_index][col_index],
+                             multiple_trans_tradeoff);
+          + relative_weight_future_trans
+          * minimum_transition(*cost_matrix, col_index);
+        if (new_value != (*cost_matrix)[row_index][col_index])
+        {
+          changed = true;
+          (*cost_matrix)[row_index][col_index] = new_value;
+        } // if
+      } // for
+    } // for
+  } while (changed);
+  return cost_matrix;
+} // function anticipate_future
+
+// Finds and returns the minimal cost/distance of a transition from a given
+// a given frame to any other frame
+double minimum_transition(std::vector <std::vector <double>> & dist_matrix,
+                          unsigned int frame_number)
+{
+  double minimum = dist_matrix[frame_number][0];
+  for (int col_index = 1; col_index < dist_matrix[frame_number].size();
+       col_index++)
+  {
+    if (dist_matrix[frame_number][col_index] < minimum)
+    {
+      minimum = dist_matrix[frame_number][col_index];
+    } // if
+  } // for
+  return minimum;
+} // function minimum_transition
+
+// Parses and returns a double from a given string
+double s_to_doub(std::string string)
+{
+  std::istringstream stream(string);
+  double value;
+  if (!(stream >> value))
+  {
+    return 0;
+  } // if
+  return value;
+} // function s_to_doub
+
+// Displays a list of flags than can be used as command line arguments
+void display_help()
+{
+  std::cout << "Correct usage: ./vtg input_video [flags]"
+            << std::endl << std::endl
+            << "Use luminance as measure of similarity: -l" << std::endl
+            << "Equalise video brightness: -b" << std::endl
+            << "Stabilise video: -s" << std::endl
+            << "Set matrix display size: -m min_width" << std::endl
+            << "Set filter tap size: -f num_tap" << std::endl
+            << "Anticipate future costs of transitions: -a" << std::endl
+            << "Set tradeoff between making single vs. multiple transitions: "
+            << "-t value" << std::endl
+            << "Set relative weight of future transitions: -r value"
+            << std::endl;
+} // function display_help

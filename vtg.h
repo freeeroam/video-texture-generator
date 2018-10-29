@@ -65,3 +65,17 @@ cv::Mat find_reference_image(Video & video, int num_portions);
 double standard_deviation(std::vector <double> values, double mean);
 template <class T>
 T maximum_component_value(std::vector <std::vector <T>> & matrix);
+template <class T>
+T minimum_component_value(std::vector <std::vector <T>> & matrix,
+                          bool non_zero);
+bool stabilise_video(cv::VideoCapture & cap);
+std::vector <std::vector <double>> * preserve_dynamics(
+  std::vector <std::vector <double>> & matrix, std::vector <double> & weights);
+std::vector <double> * filter_weights(int num_weights);
+unsigned int factorial(unsigned int n);
+std::vector <std::vector <double>> * anticipate_future(
+  std::vector <std::vector <double>> & dist_matrix);
+double minimum_transition(std::vector <std::vector <double>> & dist_matrix,
+                          unsigned int frame_number);
+double s_to_doub(std::string string);
+void display_help();
