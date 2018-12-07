@@ -1,5 +1,6 @@
 #include <string>
 #include <vector>
+#include <list>
 #include <opencv2/core/core.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/video/video.hpp>
@@ -26,6 +27,19 @@ class Video
     bool operator==(Video & other_video);
 }; // class Video
 
+struct Transition
+{
+  int source;
+  int destination;
+  double average_cost;
+}; // struct Transition
+
+struct CompoundLoop
+{
+  std::list <struct Transition> transitions;
+  double total_cost;
+}; // struct CompoundLoop
+
 // Different measures of similarity
 enum similarity_measure : unsigned int
 {
@@ -49,8 +63,8 @@ cv::Mat * enlarge_matrix(cv::Mat & matrix);
 void display_distance_matrix(std::vector <std::vector <double>> & dist_matrix);
 void display_transition_matrix(
   std::vector <std::vector <double>> & prob_matrix);
-cv::Mat * threshold_matrix(std::vector <std::vector <double>> & matrix,
-                         double threshold);
+cv::Mat * create_binary_matrix(std::vector <std::vector <double>> & matrix,
+                               double threshold);
 cv::Mat * heat_map(std::vector <std::vector <double>> & dist_matrix);
 double calculate_threshold(std::vector <std::vector <double>> & matrix);
 void normalise_probabilities(std::vector <std::vector <double>> & matrix);
@@ -79,3 +93,31 @@ double minimum_transition(std::vector <std::vector <double>> & dist_matrix,
                           unsigned int frame_number);
 double s_to_doub(std::string string);
 void display_help();
+void select_only_local_maxima(
+  std::vector <std::vector <double>> & dist_matrix);
+template <class T>
+T matrix_total(std::vector <std::vector <T>> & matrix);
+template <class T>
+void threshold_matrix(std::vector <std::vector <double>> & matrix, bool below,
+                      T threshold, T new_value);
+std::list <struct Transition> * lowest_average_cost_transitions(
+  std::vector <std::vector <double>> & dist_matrix, int max_remaining);
+bool compare_transitions(struct Transition & first,
+                         struct Transition & second);
+template <class T>
+std::vector <T> * vector_from_list(std::list <T> & list);
+std::vector <std::vector <CompoundLoop>> * dp_table(
+  std::list <struct Transition> & transition_list, int max_loop_length);
+bool transition_ranges_overlap(std::list <struct Transition> transitions,
+                               struct Transition primitive);
+int compound_loop_length(struct CompoundLoop & loop);
+struct CompoundLoop * merge_compound_loops(struct CompoundLoop & first,
+                                           struct CompoundLoop & second);
+void print_transitions_list(std::list <struct Transition> & transitions);
+int transition_length(struct Transition transition);
+void schedule_transitions(struct CompoundLoop & loop);
+struct Transition remove_latest_transition(
+  std::list <struct Transition> & transitions);
+std::list <std::list <struct Transition>> * continuous_ranges(
+  std::list <struct Transition> transitions);
+std::vector <cv::Mat> * create_loop_frame_sequence(struct CompoundLoop & loop);

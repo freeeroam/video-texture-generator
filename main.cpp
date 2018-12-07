@@ -10,20 +10,23 @@ bool equalise_brightness = false;
 bool stabilise = false;
 int tap_filter = 0;
 bool anticipate_future_cost = false;
-double multiple_trans_tradeoff = 0.5;
-double relative_weight_future_trans = 0.99;
+double multiple_trans_tradeoff = 0.9;
+double relative_weight_future_trans = 0.991;
 int min_matrix_display_size = 500;
+bool prune_transitions = false;
+std::string output_file_path =
+  "/home/ant/development/video-texture-generator/textures/";
+std::string output_file_name = "output.avi";
 
 extern bool stabilise_video(cv::VideoCapture & cap);
 
 int main(int argc, char ** argv)
 {
-  std::string output_file_name = "output.avi";
-
   if (!check_flags(argc, argv))
   {
     return 0;
   } // if
+  output_file_path += output_file_name;
 
   input_video = load_video(argv[1]);
   if (input_video == nullptr)
@@ -42,16 +45,49 @@ int main(int argc, char ** argv)
     distances = preserve_dynamics(*distances, *weights);
   } // if
 
+  std::vector <std::vector <double>> * anticipated_distances = nullptr;
   if (anticipate_future_cost)
   {
-    distances = anticipate_future(*distances);
+    anticipated_distances = anticipate_future(*distances);
   } // if
 
+  std::list <struct Transition> * best_transitions = nullptr;
+  if (prune_transitions)
+  {
+    select_only_local_maxima(*anticipated_distances);
+    best_transitions = lowest_average_cost_transitions(*distances, 20);
+  } // if
+
+  std::vector <std::vector<CompoundLoop>> * loop_table =
+    dp_table(*best_transitions, 50);
+  struct CompoundLoop compound_loop;
+  for (int row_index = 50; row_index > 0; row_index--)
+  {
+    for (int col_index = 0; col_index < best_transitions->size(); col_index++)
+    {
+      if ((*loop_table)[row_index][col_index].total_cost > 0)
+      {
+        compound_loop = (*loop_table)[row_index][col_index];
+        schedule_transitions(compound_loop);
+        row_index = 0;
+        break;
+      } // if
+    } // for
+  } // for
+  std::vector <cv::Mat> * output_frames =
+    create_loop_frame_sequence(compound_loop);
+  Video output_video (output_frames, input_video->get_fps(),
+                      input_video->get_frame_width(),
+                      input_video->get_frame_height());
+  write_video(output_video, output_file_path);
+
+  /**
   std::vector <std::vector <double>> * probabilities =
     probability_matrix(*distances, 3 * average_distance(*distances));
   normalise_probabilities(*probabilities);
   //display_transition_matrix(*probabilities);
   display_distance_matrix(*distances);
+  **/
 
   return 0;
 } // function main
@@ -94,6 +130,9 @@ bool check_flags(int argc, char ** argv)
         } else if (argv[arg_index][char_index] == 's') // stabilise first
         {
           stabilise = true;
+        } else if (argv[arg_index][char_index] == 'p')
+        {
+          prune_transitions = true;
         } else if (argv[arg_index][char_index] == 'm'
                    && char_index == strlen(argv[arg_index]) - 1
                    && argc > arg_index) // set matrix display size
@@ -322,8 +361,6 @@ std::vector <std::vector <double>> * probability_matrix(
 // Given a distance matrix, calculates and returns the average distance.
 double average_distance(std::vector <std::vector <double>> & matrix)
 {
-  std::cout << "Calculating average distances..." << std::endl; // output for debug
-
   double total = 0;
   int number_nonzeros = 0;
   for (int row_index = 0; row_index < matrix.size(); row_index++)
@@ -345,7 +382,8 @@ double average_distance(std::vector <std::vector <double>> & matrix)
 void display_binary_matrix(std::vector <std::vector <double>> & matrix)
 {
   std::cout << "Displaying matrix..." << std::endl; // output for debugging
-  cv::Mat * binary_mat = threshold_matrix(matrix, calculate_threshold(matrix));
+  cv::Mat * binary_mat = create_binary_matrix(matrix,
+                                              calculate_threshold(matrix));
 
   int component_length = 1;
   while (component_length * matrix.size() < min_matrix_display_size)
@@ -474,8 +512,8 @@ void display_transition_matrix(
 // Returns a "binary" Mat object with components set to 0 if their
 // corresponding components in the original matrix are greater than the given
 // threshold, or set to 255 otherwise.
-cv::Mat * threshold_matrix(std::vector <std::vector <double>> & matrix,
-                           double threshold)
+cv::Mat * create_binary_matrix(std::vector <std::vector <double>> & matrix,
+                               double threshold)
 {
   cv::Mat * output = new cv::Mat(matrix.size(), matrix.size(), CV_8U,
                                  cv::Scalar::all(255));
@@ -492,7 +530,7 @@ cv::Mat * threshold_matrix(std::vector <std::vector <double>> & matrix,
     } // for
   } // for
   return output;
-} // function threshold_matrix
+} // function create_binary_matrix
 
 // Returns a "heat map" representation of a given probability matrix.
 cv::Mat * heat_map(std::vector <std::vector <double>> & dist_matrix)
@@ -605,6 +643,8 @@ Video * load_video(std::string file_name)
 
 void write_video(Video & video, std::string & file_name)
 {
+  std::cout << "Saving output video..." << std::endl; // output for debugging
+
   std::vector <cv::Mat> ::iterator it;
   cv::VideoWriter output(file_name, CV_FOURCC('M', 'J', 'P', 'G'),
                          video.get_fps(), cv::Size(video.get_frame_width(),
@@ -857,30 +897,34 @@ std::vector <std::vector <double>> * preserve_dynamics(
   int fil_col_index = 0;
   for (int row_index = 0; row_index < matrix.size(); row_index++)
   {
+    fil_row_index = 0;
+    fil_col_index = 0;
     for (int col_index = 0; col_index < matrix.size(); col_index++)
     {
-      total = 0;
-      // set correct index values for filtered matrix
-      if (row_index == m && col_index == m) // initialise
-      {
-        fil_row_index = 0;
-        fil_col_index = 0;
-      } else if (fil_col_index + 1 < filtered_matrix->size()) // next column
+      // set correct index values for filtered matrix ****
+      if (row_index >= m && col_index >= m
+          && fil_col_index < filtered_matrix->size())
       {
         fil_col_index++;
-      } else if (fil_row_index + 1 < filtered_matrix->size()) // next row
+      } else if (row_index >= m && col_index >= m
+                 && fil_row_index < filtered_matrix->size()
+                 && fil_col_index >= filtered_matrix->size()) // next row
       {
-        fil_row_index++;
         fil_col_index = 0;
-      } else
+        fil_row_index++;
+      } else if (fil_col_index > filtered_matrix->size()
+                 || fil_row_index > filtered_matrix->size())
       {
         row_index = matrix.size();
         break;
       } // else
 
-      for (int filter_index = -m; filter_index <= m - 1; filter_index++)
+      total = 0;
+      for (int filter_index = -m; filter_index < m; filter_index++)
       {
-        if (row_index + filter_index < matrix.size()
+        if (row_index + filter_index >= 0
+            && row_index + filter_index < matrix.size()
+            && col_index + filter_index >= 0
             && col_index + filter_index < matrix.size())
         {
           total += weights[filter_index + m]
@@ -935,11 +979,11 @@ std::vector <std::vector <double>> * anticipate_future(
 
   // Repeatedly iterate from the last row to the first and compute anticipated
   // costs until the matrix stabilises
-  bool changed = false;
+  int total_change = 0;
   double new_value = 0;
   do
   {
-    changed = false;
+    total_change = 0;
     for (int row_index = dist_matrix.size() - 1; row_index >= 0; row_index--)
     {
       for (int col_index = 0; col_index < dist_matrix.size(); col_index++)
@@ -948,14 +992,12 @@ std::vector <std::vector <double>> * anticipate_future(
                              multiple_trans_tradeoff);
           + relative_weight_future_trans
           * minimum_transition(*cost_matrix, col_index);
-        if (new_value != (*cost_matrix)[row_index][col_index])
-        {
-          changed = true;
-          (*cost_matrix)[row_index][col_index] = new_value;
-        } // if
+        total_change +=
+          std::abs((*cost_matrix)[row_index][col_index] - new_value);
+        (*cost_matrix)[row_index][col_index] = new_value;
       } // for
     } // for
-  } while (changed);
+  } while ((double) total_change / dist_matrix.size() > 0.00000000000001);
   return cost_matrix;
 } // function anticipate_future
 
@@ -1001,6 +1043,506 @@ void display_help()
             << "Anticipate future costs of transitions: -a" << std::endl
             << "Set tradeoff between making single vs. multiple transitions: "
             << "-t value" << std::endl
-            << "Set relative weight of future transitions: -r value"
+            << "Set relative weight of future transitions: -r value" << std::endl
+            << "Prune transitions: -p" << std::endl
+            << "Output file name: -o file_name.avi"
             << std::endl;
 } // function display_help
+
+// Gets rid of all transitions but those that are local maxima
+void select_only_local_maxima(
+  std::vector <std::vector <double>> & dist_matrix)
+{
+  std::cout << "Pruning the set of possible transitions..." << std::endl;
+
+  int radius = 5; // filter or radius size
+  int local_min[2] = {-1, -1};
+  double max_allowed_distance = average_distance(dist_matrix) * 0.7;
+  double max_distance = maximum_component_value <double> (dist_matrix);
+
+  for (int row_index = 0; row_index < dist_matrix.size(); row_index++)
+  {
+    for (int col_index = 0; col_index < dist_matrix.size(); col_index++)
+    {
+      if (dist_matrix[row_index][col_index] == max_distance)
+      {
+        continue; // skip transitions that are too unlikely
+      } // if
+
+      local_min[0] = row_index;
+      local_min[1] = col_index;
+
+      for (int region_row = 0; region_row < radius * 2 + 1; region_row++)
+      {
+        for (int region_col = 0; region_col < radius * 2 + 1; region_col++)
+        {
+          if (row_index - radius + region_row >= 0
+              && row_index - radius + region_row < dist_matrix.size()
+              && col_index - radius + region_col >= 0
+              && col_index - radius + region_col < dist_matrix.size()
+              && dist_matrix[row_index - radius + region_row]
+                            [col_index - radius + region_col]
+              < dist_matrix[local_min[0]][local_min[1]])
+          {
+            local_min[0] = row_index - radius + region_row;
+            local_min[1] = col_index - radius + region_col;
+          } // if
+        } // for
+      } // for
+
+      // set all non-maximal frame distances in the region to a high value
+      for (int region_row = 0; region_row < radius * 2 + 1; region_row++)
+      {
+        for (int region_col = 0; region_col < radius * 2 + 1; region_col++)
+        {
+          if (row_index - radius + region_row >= 0
+              && row_index - radius + region_row < dist_matrix.size()
+              && col_index - radius + region_col >= 0
+              && col_index - radius + region_col < dist_matrix.size()
+              && row_index - radius + region_row != local_min[0]
+              && col_index - radius + region_col != local_min[1])
+          {
+            dist_matrix[row_index - radius + region_row]
+                       [col_index - radius + region_col] = max_distance;
+          } // if
+        } // for
+      } // for
+    } // for
+  } // for
+} // function select_only_local_maxima
+
+template <class T>
+T matrix_total(std::vector <std::vector <T>> & matrix)
+{
+  T total = 0;
+  for (int row_index = 0; row_index < matrix.size(); row_index++)
+  {
+    for (int col_index = 0; col_index < matrix[0].size(); col_index++)
+    {
+      total += matrix[row_index][col_index];
+    } // for
+  } // for
+  return total;
+} // function matrix_total
+
+// Sets all values below a threshold or above a given threshold to a given
+// new value
+template <class T>
+void threshold_matrix(std::vector <std::vector <double>> & matrix, bool below,
+                      T threshold, T new_value)
+{
+  bool comparison = false;
+  for (int row_index = 0; row_index < matrix.size(); row_index++)
+  {
+    for (int col_index = 0; col_index < matrix[0].size(); col_index++)
+    {
+      comparison = below ? matrix[row_index][col_index] < threshold
+        : matrix[row_index][col_index] > threshold;
+      if (comparison)
+      {
+        matrix[row_index][col_index] = new_value;
+      } // if
+    } // for
+  } // for
+} // function threshold_matrix
+
+// Calculate the average cost for each transition and returns a list of those
+// with the lowest average cost
+std::list <struct Transition> * lowest_average_cost_transitions(
+  std::vector <std::vector <double>> & dist_matrix, int max_remaining)
+{
+  std::cout << "Sorting transitions based on average cost..." << std::endl;
+
+  double max_distance = maximum_component_value <double> (dist_matrix);
+  std::list <struct Transition> transitions = std::list <struct Transition> ();
+  std::list <struct Transition> * best_transitions =
+    new std::list <struct Transition> ();
+
+  // Calculates average cost for all remaining transitions
+  for (int row_index = 0; row_index < dist_matrix.size(); row_index++)
+  {
+    for (int col_index = 0; col_index < dist_matrix.size(); col_index++)
+    {
+      if (dist_matrix[row_index][col_index] >= max_distance
+          || dist_matrix[row_index][col_index] <= 0)
+      {
+        continue;
+      } // if
+      struct Transition current_transition;
+      if (row_index > col_index) // only backwards transitions are allowed
+      {
+        current_transition.source = row_index;
+        current_transition.destination = col_index;
+      } else
+      {
+        current_transition.source = col_index;
+        current_transition.destination = row_index;
+      } // else
+      current_transition.average_cost = dist_matrix[row_index][col_index];
+      transitions.push_back(current_transition);
+    } // for
+  } // for
+
+  // Sort transitions based on average costs
+  transitions.sort(compare_transitions);
+
+  // Return small number of best transitions
+  while (max_remaining > transitions.size())
+  {
+    max_remaining--;
+  } // while
+  best_transitions->splice(best_transitions->end(), transitions,
+                           transitions.begin(), std::next(transitions.begin(),
+                                                          max_remaining));
+  return best_transitions;
+} // function lowest_average_cost_transitions
+
+// Given two transitions, returns true if the first is less than or equal to the
+// second, or false otherwise.
+bool compare_transitions(struct Transition & first,
+                         struct Transition & second)
+{
+  return first.average_cost <= second.average_cost;
+} // function compare_transitions
+
+// Utility function which creates and returns a vector containing all of the
+// elements in a list.
+template <class T>
+std::vector <T> * vector_from_list(std::list <T> & list)
+{
+  std::vector <T> * vector = new std::vector <T> (list.size());
+  int index = 0;
+  for (typename std::list <T> ::const_iterator it = list.begin();
+       it != list.end(); it++)
+  {
+    (*vector)[index] = *it;
+    index++;
+  } // for
+  return vector;
+} // function vector_from_list
+
+// Creates and returns a dynamic programming table used to find optimal loops
+std::vector <std::vector <CompoundLoop>> * dp_table(
+  std::list <struct Transition> & transition_list, int max_loop_length)
+{
+  std::cout << "Selecting a set of transitions to use..." << std::endl;
+
+  // Store transitions in a vector and initialise the DP table
+  std::vector <struct Transition> * transitions =
+    vector_from_list <struct Transition> (transition_list);
+  std::vector <std::vector <CompoundLoop>> * table =
+    new std::vector <std::vector <CompoundLoop>> (
+      max_loop_length + 1, // row 0 is left empty
+      std::vector <CompoundLoop> (transitions->size()));
+
+  // Initialise compound loop costs
+  for (int row = 0; row <= max_loop_length; row++)
+  {
+    for (int col = 0; col < transitions->size(); col++)
+    {
+      (*table)[row][col].total_cost = 0;
+    } // for
+  } // for
+
+  // Add primitive loops to their columns
+  int length = 0;
+  for (int col = 0; col < transitions->size(); col++)
+  {
+    length = transition_length((*transitions)[col]);
+    (*table)[length][col].transitions.push_back((*transitions)[col]);
+    (*table)[length][col].total_cost = (*transitions)[col].average_cost;
+  } // for
+
+  // Main DP loop
+  struct CompoundLoop * lowest_cost_loop = nullptr;
+  struct CompoundLoop * loop_considered = nullptr;
+  int compound_length = 0;
+  for (int row = 1; row <= max_loop_length; row++)
+  {
+    for (int col = 0; col < transitions->size(); col++)
+    {
+
+      // Skip cells of length less than the column's primitive loop length
+      if (row < transition_length((*transitions)[col]))
+      {
+        continue;
+      } // if
+
+      lowest_cost_loop = nullptr;
+
+      // Check compound loops of shorter length in same column
+      for (int offset = 1; offset < row; offset++)
+      {
+        if (row - offset > 0
+            && row >= transition_length((*transitions)[col]))
+        {
+          // Try to add compound loops from colums whose primitive loops have
+          // ranges which overlap that of the column being considered
+          for (int cmp_col = 0; cmp_col < transitions->size(); cmp_col++)
+          {
+            if (transition_length((*transitions)[cmp_col])
+                + compound_loop_length((*table)[row - offset][col]) != row
+                || !transition_ranges_overlap(
+                      (*table)[row - offset][col].transitions,
+                      (*transitions)[cmp_col]))
+            {
+              continue;
+            } // if
+
+            for (int cmp_row = 0; cmp_row < max_loop_length; cmp_row++)
+            {
+              if ((*table)[row - offset][col].total_cost == 0)
+              {
+                continue;
+              } else
+              {
+                compound_length =
+                  compound_loop_length((*table)[row - offset][col])
+                  + compound_loop_length((*table)[cmp_row][cmp_col]);
+                if (compound_length > row)
+                {
+                  break;
+                } else if (compound_length != row)
+                {
+                  continue;
+                } // else if
+              } // else if
+
+              // Check if loop under consideration is better than current best
+              loop_considered =
+                merge_compound_loops((*table)[row - offset][col],
+                                     (*table)[cmp_row][cmp_col]);
+              if (lowest_cost_loop == nullptr
+                  || loop_considered->total_cost
+                  < lowest_cost_loop->total_cost)
+              {
+                lowest_cost_loop = loop_considered;
+              } // if
+            } // for
+          } // for
+        } // if
+      } // for
+
+      if (lowest_cost_loop != nullptr)
+      {
+        (*table)[row][col] = *lowest_cost_loop;
+      } // if
+    } // for
+  } // for
+  return table;
+} // function dp_table
+
+// Returns true if the ranges the given list of primitive loops overlap the given
+// primitive loops or false otherwise
+bool transition_ranges_overlap(std::list <struct Transition> transitions,
+                               struct Transition primitive)
+{
+  if (transitions.empty())
+  {
+    return false;
+  } // if
+
+  int min = transitions.front().source;
+  int max = transitions.front().destination;
+  std::list <struct Transition> ::const_iterator it;
+  for (it = transitions.begin(); it != transitions.end(); it++)
+  {
+    if ((*it).source < min)
+    {
+      min = (*it).source;
+    } else if ((*it).destination > max)
+    {
+      max = (*it).destination;
+    } // else if
+  } // for
+
+  return primitive.source >= min && primitive.source <= max
+    || primitive.destination >= min && primitive.destination <= max;
+} // function transition_ranges_overlap
+
+// Returns the length of a given compound loop
+int compound_loop_length(struct CompoundLoop & loop)
+{
+  if (loop.transitions.size() < 1)
+  {
+    return 0;
+  } // if
+
+  int total = 0;
+  std::list <struct Transition> ::const_iterator it;
+  for (it = loop.transitions.begin(); it != loop.transitions.end(); it++)
+  {
+    total += transition_length(*it);
+  } // for
+
+  return total;
+} // function compound_loop_length;
+
+// Given two compound loops, returns a compound loop which is a combination
+// of the first and second
+struct CompoundLoop * merge_compound_loops(struct CompoundLoop & first,
+                                           struct CompoundLoop & second)
+{
+  struct CompoundLoop * loop = new struct CompoundLoop;
+  std::list <struct Transition> ::const_iterator it;
+
+  loop->transitions = first.transitions;
+  loop->total_cost = first.total_cost;
+  for (it = second.transitions.begin(); it != second.transitions.end(); it++)
+  {
+    loop->transitions.push_back(*it);
+    loop->total_cost += (*it).average_cost;
+  } // for
+  return loop;
+} // function merge_compound_loops
+
+// Outputs the given list of transitions to standard output. Mainly used for
+// debugging purposes.
+void print_transitions_list(std::list <struct Transition> & transitions)
+{
+  std::cout << "Transitions List: (" << transitions.size() << ")" <<std::endl;
+  std::list <struct Transition> ::const_iterator it;
+  int count = 0;
+  for (it = transitions.begin(); it != transitions.end(); it++)
+  {
+    std::cout << count << ") Source: " << (*it).source << std::endl
+              << "    Destination: " << (*it).destination << std::endl
+              << "    Range: " << transition_length(*it) << std::endl;
+    count++;
+  } // for
+} // function print_transitions_list
+
+// Returns the length of a transition
+int transition_length(struct Transition transition)
+{
+  return std::abs(transition.destination - transition.source);
+} // function transition_length
+
+// Given a non-empty compound loop, schedules and updates the list of
+// transitions so they form a valid compound loop
+void schedule_transitions(struct CompoundLoop & loop)
+{
+  std::cout << "Scheduling primitive loops to form a valid compound loop..."
+            << std::endl; // output for debugging
+
+  std::list <struct Transition> schedule;
+  std::list <std::list <struct Transition>> * ranges = nullptr;
+  std::list <std::list <struct Transition>> * new_ranges = nullptr;
+  std::list <std::list <struct Transition>> ::iterator range_it;
+  std::list <struct Transition> ::iterator trans_it;
+  struct Transition removed = remove_latest_transition(loop.transitions);
+  schedule.push_back(removed);
+  ranges = continuous_ranges(loop.transitions);
+  for (range_it = ranges->begin(); range_it != ranges->end();)
+  {
+    for (trans_it = (*range_it).begin(); trans_it != (*range_it).end();)
+    {
+      if ((*trans_it).source > removed.destination)
+      {
+        removed = *trans_it;
+        schedule.push_back(removed);
+        (*range_it).erase(trans_it);
+        trans_it = (*range_it).begin();
+
+        // split range into continuous ranges
+        new_ranges = continuous_ranges(*range_it);
+        ranges->erase(range_it);
+        for (range_it = new_ranges->begin(); range_it != new_ranges->end();
+             range_it++)
+        {
+          ranges->push_front(*range_it);
+        } // for
+        range_it = ranges->begin();
+        break;
+      } // if
+      trans_it++;
+    } // for
+    range_it++;
+  } // for
+  loop.transitions = schedule;
+} // function schedule_transitions
+
+// Removes and returns the transition in the given list which starts at
+// the latest point in the sequence
+struct Transition remove_latest_transition(
+  std::list <struct Transition> & transitions)
+{
+  std::list <struct Transition> ::const_iterator latest = transitions.begin();
+  std::list <struct Transition> ::const_iterator it;
+  for (it = std::next(transitions.begin()); it != transitions.end();
+       it++)
+  {
+    if ((*it).source > (*latest).source)
+    {
+      latest = it;
+    } // if
+  } // for
+  struct Transition latest_transition = *latest;
+  transitions.erase(latest);
+  return latest_transition;
+} // function remove_latest_transition
+
+// Splits the given list of transitions into several with continuous ranges.
+std::list <std::list <struct Transition>> * continuous_ranges(
+  std::list <struct Transition> transitions)
+{
+  std::list <struct Transition> ::iterator trans_it;
+  std::list <std::list <struct Transition>> * ranges =
+    new std::list <std::list <struct Transition>>();
+  bool range_matched = false;
+  std::list <std::list <struct Transition>> ::iterator range_it;
+  for (trans_it = transitions.begin(); trans_it != transitions.end();
+       trans_it++)
+  {
+    range_matched = false;
+    for (range_it = ranges->begin(); range_it != ranges->end();
+         range_it++)
+    {
+      if (transition_ranges_overlap(*range_it, *trans_it))
+      {
+        (*range_it).push_back(*trans_it);
+        break;
+      } // if
+    } // for
+
+    if (!range_matched)
+    {
+      std::list <struct Transition> new_range;
+      new_range.push_back(*trans_it);
+      ranges->push_back(new_range);
+    } // if
+  } // for
+
+  return ranges;
+} // function continuous_ranges
+
+std::vector <cv::Mat> * create_loop_frame_sequence(struct CompoundLoop & loop)
+{
+  std::cout << "Generating frame sequence from the compound loop..."
+            << std::endl; // output for debugging
+
+  std::list <struct Transition> ::const_iterator trans_it;
+  std::list <cv::Mat> frames;
+  int start_frame = 0;
+  int end_frame = 0;
+  for (trans_it = loop.transitions.begin();
+       trans_it != loop.transitions.end(); trans_it++)
+  {
+    start_frame = (*trans_it).destination + 1;
+    if (trans_it == std::prev(loop.transitions.end()))
+    {
+      end_frame = loop.transitions.front().source;
+    } else
+    {
+      end_frame = (*std::next(trans_it)).source;
+    } // else
+
+    frames.push_back(input_video->get_frames()[(*trans_it).source]);
+    frames.push_back(input_video->get_frames()[(*trans_it).destination]);
+    for (int frame_index = start_frame; frame_index < end_frame; frame_index++)
+    {
+      frames.push_back(input_video->get_frames()[frame_index]);
+    } // for
+  } // for
+  return vector_from_list <cv::Mat> (frames);
+} // function create_loop_frame_sequence
