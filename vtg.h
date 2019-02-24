@@ -38,7 +38,15 @@ struct CompoundLoop
 {
   std::list <struct Transition> transitions;
   double total_cost;
+
+  CompoundLoop() : total_cost(0) {}
 }; // struct CompoundLoop
+
+struct PreRenderedSequence
+{
+  std::vector <cv::Mat> * frames;
+  std::list <int> transitions;
+}; // struct PreRenderedSequence
 
 // Different measures of similarity
 enum similarity_measure : unsigned int
@@ -71,7 +79,7 @@ void normalise_probabilities(std::vector <std::vector <double>> & matrix);
 template <class T>
 void print_matrix(std::vector <std::vector <T>> & matrix);
 Video * load_video(std::string file_name);
-void write_video(Video & video, std::string & file_name);
+void write_video(Video & video, std::string file_name);
 void on_event(int event, int x, int y,int flags, void * userdata);
 void equalise_video_brightness(Video & video, cv::Mat & reference);
 double average_luminance(cv::Mat & image);
@@ -85,6 +93,8 @@ T minimum_component_value(std::vector <std::vector <T>> & matrix,
 bool stabilise_video(cv::VideoCapture & cap);
 std::vector <std::vector <double>> * preserve_dynamics(
   std::vector <std::vector <double>> & matrix, std::vector <double> & weights);
+std::vector <std::vector <double>> * preserve_dynamics2(
+  std::vector <std::vector <double>> & matrix, std::vector <double> & weights);
 std::vector <double> * filter_weights(int num_weights);
 unsigned int factorial(unsigned int n);
 std::vector <std::vector <double>> * anticipate_future(
@@ -94,6 +104,8 @@ double minimum_transition(std::vector <std::vector <double>> & dist_matrix,
 double s_to_doub(std::string string);
 void display_help();
 void select_only_local_maxima(
+  std::vector <std::vector <double>> & dist_matrix);
+void select_only_local_maxima2(
   std::vector <std::vector <double>> & dist_matrix);
 template <class T>
 T matrix_total(std::vector <std::vector <T>> & matrix);
@@ -120,4 +132,25 @@ struct Transition remove_latest_transition(
   std::list <struct Transition> & transitions);
 std::list <std::list <struct Transition>> * continuous_ranges(
   std::list <struct Transition> transitions);
-std::vector <cv::Mat> * create_loop_frame_sequence(struct CompoundLoop & loop);
+struct PreRenderedSequence * create_loop_frame_sequence(
+  struct CompoundLoop & loop, std::string filename);
+cv::Mat blend_frames(cv::Mat & frame_a, float alpha, cv::Mat & frame_b,
+                     float beta);
+cv::vector <cv::Mat> * blend_frames_at_transitions(
+  std::vector <cv::Mat> & frames, std::list <int> & transition_points,
+  int frames_per_blend);
+int correct_frame_index(int sequence_length, int frame_index);
+void save_parameters(std::string filepath);
+void save_transition_pairs(std::vector <cv::Mat> & frames,
+                           std::list <int> & transitions,
+                           std::string filepath);
+void setup_output_dirs(std::string filepath);
+void save_matrix(std::vector <std::vector <double>> & matrix,
+                 std::string filepath);
+std::string output_name();
+void save_distance_values(std::vector <std::vector <double>> & matrix,
+                          std::string filepath);
+std::vector <std::vector <double>> * load_distance_matrix(
+  std::string filepath);
+void load_parameters_from_string(std::string parameters);
+std::list <std::string> load_parameters_from_file(std::string filename);

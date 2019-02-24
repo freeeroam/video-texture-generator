@@ -2,7 +2,7 @@ CXX = g++
 CXXFLAGS = -Wall -g -ggdb -std=c++11
 
 vtg: main.o Video.o stabilise.o
-	$(CXX) $(CXXFLAGS) -o vtg main.o Video.o stabilise.o `pkg-config --cflags --libs opencv`
+	$(CXX) $(CXXFLAGS) -o vtg main.o Video.o stabilise.o `pkg-config --cflags --libs opencv` -lboost_system -lboost_filesystem
 
 main.o: main.cpp
 	$(CXX) -g -c main.cpp

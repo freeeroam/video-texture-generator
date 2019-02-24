@@ -1,22 +1,30 @@
 #include "vtg.h"
 #include <iostream>
+#include <fstream>
 #include <iterator>
 #include <cmath>
 #include <sstream>
+#include <boost/filesystem.hpp>
+#include <iomanip>
 
 enum similarity_measure sim_measure = rgb;
 Video * input_video = nullptr;
 bool equalise_brightness = false;
 bool stabilise = false;
 int tap_filter = 0;
-bool anticipate_future_cost = false;
-double multiple_trans_tradeoff = 0.9;
-double relative_weight_future_trans = 0.991;
+bool anticipate_future_cost = true;
+double multiple_trans_tradeoff = 0.95;
+double relative_weight_future_trans = 0.99;
 int min_matrix_display_size = 500;
-bool prune_transitions = false;
+bool prune_transitions = true;
+bool enable_blending = true;
+int num_frames_to_blend = 2;
+std::vector <float> * alpha_weights = nullptr;
 std::string output_file_path =
   "/home/ant/development/video-texture-generator/textures/";
 std::string output_file_name = "output.avi";
+std::string parameters_file = "";
+std::list <std::string> test_parameters;
 
 extern bool stabilise_video(cv::VideoCapture & cap);
 
@@ -35,51 +43,153 @@ int main(int argc, char ** argv)
     return 0;
   } // if
 
-  apply_preprocessing(*input_video);
+  // Save distance matrix and matrix distance values if not already saved
+  boost::filesystem::path distances_txt (output_file_path + "/distances.txt");
   std::vector <std::vector <double>> * distances =
-    distance_matrix(*input_video);
-
-  if (tap_filter > 0)
+    boost::filesystem::exists(distances_txt)
+    ? load_distance_matrix(output_file_path + "/distances.txt")
+    : distance_matrix(*input_video);
+  if (!boost::filesystem::exists(distances_txt))
   {
-    std::vector <double> * weights = filter_weights(tap_filter * 2);
-    distances = preserve_dynamics(*distances, *weights);
+    save_distance_values(*distances, output_file_path + "/distances.txt");
+  } // if
+  boost::filesystem::path distances_img (output_file_path + "/distances.png");
+  if (!boost::filesystem::exists(distances_img))
+  {
+    save_matrix(*distances, output_file_path + "/distances.png");
   } // if
 
+  // Get sets of program parameters from files or from program arguments
+  if (parameters_file != "")
+  {
+    test_parameters = load_parameters_from_file("/home/ant/development/video-texture-generator/"
+                              + parameters_file);
+  } else
+  {
+    std::ostringstream params;
+    params << std::setprecision(20)
+      << "r=" << std::to_string((int)sim_measure)
+      << ",b=" << std::to_string((int)equalise_brightness)
+      << ",f=" << std::to_string(tap_filter)
+      << ",t=" << std::to_string(multiple_trans_tradeoff)
+      << ",w=" << std::to_string(relative_weight_future_trans)
+      << ",c=" << std::to_string(num_frames_to_blend)
+      << '\n';
+    test_parameters.push_back(params.str());
+  } // else
+
+  // Run tests for all sets of parameters
+  std::cout << "Running " << test_parameters.size() << " tests" << std::endl; // debugging
+  std::list <std::string> ::const_iterator test_it;
+  std::vector <std::vector <double>> * pd_distances = nullptr;
   std::vector <std::vector <double>> * anticipated_distances = nullptr;
-  if (anticipate_future_cost)
-  {
-    anticipated_distances = anticipate_future(*distances);
-  } // if
-
+  std::vector <std::vector<struct CompoundLoop>> * loop_table = nullptr;
   std::list <struct Transition> * best_transitions = nullptr;
-  if (prune_transitions)
-  {
-    select_only_local_maxima(*anticipated_distances);
-    best_transitions = lowest_average_cost_transitions(*distances, 20);
-  } // if
-
-  std::vector <std::vector<CompoundLoop>> * loop_table =
-    dp_table(*best_transitions, 50);
+  std::vector <double> * weights = nullptr;
+  struct PreRenderedSequence * sequence = nullptr;
   struct CompoundLoop compound_loop;
-  for (int row_index = 50; row_index > 0; row_index--)
+  std::vector <cv::Mat> * output_frames = nullptr;
+  for (test_it = test_parameters.begin(); test_it != test_parameters.end();
+       test_it++)
   {
-    for (int col_index = 0; col_index < best_transitions->size(); col_index++)
+    load_parameters_from_string(*test_it);
+    std::cout << "Output will be saved to: " << output_file_path << "/"
+              << output_name() << std::endl; // output for debugging
+
+    apply_preprocessing(*input_video);
+    if (tap_filter > 0)
     {
-      if ((*loop_table)[row_index][col_index].total_cost > 0)
+      weights = filter_weights(tap_filter * 2);
+      pd_distances = preserve_dynamics2(*distances, *weights);
+      delete weights;
+    } // if
+
+    if (anticipate_future_cost)
+    {
+      anticipated_distances = anticipate_future(*pd_distances);
+      delete pd_distances;
+    } // if
+
+    if (prune_transitions)
+    {
+      select_only_local_maxima2(*anticipated_distances);
+      best_transitions = lowest_average_cost_transitions(
+        *anticipated_distances, 40);
+      delete anticipated_distances;
+    } // if
+
+    boost::filesystem::create_directory(output_file_path + "/" + output_name());
+
+    loop_table = dp_table(*best_transitions, 50);
+    int videos_produced = 0;
+    for (int row_index = loop_table->size() - 1; row_index > 0; row_index--)
+    {
+      for (int col_index = 0; col_index < best_transitions->size(); col_index++)
       {
-        compound_loop = (*loop_table)[row_index][col_index];
-        schedule_transitions(compound_loop);
-        row_index = 0;
-        break;
-      } // if
+        if ((*loop_table)[row_index][col_index].total_cost > 0
+            && compound_loop_length((*loop_table)[row_index][col_index]) > 2)
+        {
+          boost::filesystem::create_directory(output_file_path + "/"
+                                              + output_name() + "/"
+                                              + std::to_string(videos_produced) + "l"
+                                              + std::to_string(row_index));
+
+          compound_loop.transitions = (*loop_table)[row_index][col_index].transitions;
+          compound_loop.total_cost = (*loop_table)[row_index][col_index].total_cost;
+          schedule_transitions(compound_loop);
+          sequence = create_loop_frame_sequence(compound_loop,
+                                                output_file_path + "/"
+                                                + output_name() + "/"
+                                                + std::to_string(
+                                                    videos_produced) + "l"
+                                                + std::to_string(row_index)
+                                                + "/transitions.txt");
+
+          // Blend frames if blending is enabled
+          if (enable_blending)
+          {
+            output_frames = blend_frames_at_transitions(*(sequence->frames),
+                                                        sequence->transitions, 4);
+          } else
+          {
+            output_frames = sequence->frames;
+          } // else
+
+          // Produce output video
+          Video output_video (output_frames, input_video->get_fps(),
+                              input_video->get_frame_width(),
+                              input_video->get_frame_height());
+
+          // Write output and data
+          save_parameters(output_file_path + "/" + output_name()
+                          + output_name() + "/"
+                          + std::to_string(videos_produced)
+                          + "l" + std::to_string(row_index)
+                          + "/parameters.txt");
+          boost::filesystem::create_directory(output_file_path + "/"
+                                              + output_name() + "/"
+                                              + std::to_string(videos_produced)
+                                              + "l" + std::to_string(row_index)
+                                              + "/transition_pairs");
+          save_transition_pairs(*(sequence->frames), sequence->transitions,
+                                output_file_path + "/" + output_name()
+                                + "/" + std::to_string(videos_produced) + "l"
+                                + std::to_string(row_index) + "/transition_pairs");
+          write_video(output_video, output_file_path + "/" + output_name()
+                      + "/" + std::to_string(videos_produced) + "l"
+                      + std::to_string(row_index) + "/texture.avi");
+          std::cout << std::endl;
+          videos_produced++;
+          delete sequence;
+          delete alpha_weights;
+        } // if
+      } // for
     } // for
+
+    std::cout << "Test complete *\n" << std::endl;
+    delete best_transitions;
+    delete loop_table;
   } // for
-  std::vector <cv::Mat> * output_frames =
-    create_loop_frame_sequence(compound_loop);
-  Video output_video (output_frames, input_video->get_fps(),
-                      input_video->get_frame_width(),
-                      input_video->get_frame_height());
-  write_video(output_video, output_file_path);
 
   /**
   std::vector <std::vector <double>> * probabilities =
@@ -89,6 +199,7 @@ int main(int argc, char ** argv)
   display_distance_matrix(*distances);
   **/
 
+  delete input_video;
   return 0;
 } // function main
 
@@ -124,6 +235,18 @@ bool check_flags(int argc, char ** argv)
         if (argv[arg_index][char_index] == 'l') // use luminance as measure
         {
           sim_measure = luminance;
+        } else if (argv[arg_index][char_index] == 'o'
+                   && argc > arg_index)
+        {
+          output_file_name = argv[arg_index + 1];
+          arg_index++;
+          break;
+        } else if (argv[arg_index][char_index] == 'i' // parameter input file
+                   && argc > arg_index)
+        {
+          parameters_file = argv[arg_index + 1];
+          arg_index++;
+          break;
         } else if (argv[arg_index][char_index] == 'b') // equalise brightness
         {
           equalise_brightness = true;
@@ -179,7 +302,7 @@ bool check_flags(int argc, char ** argv)
         } else if (argv[arg_index][char_index] == 'a') // anticipate future
         {
           anticipate_future_cost = true;
-        } else if (argv[arg_index][char_index] == 'r'
+        } else if (argv[arg_index][char_index] == 'w'
                    && char_index == strlen(argv[arg_index]) - 1
                    && argc > arg_index) // set relative weight
         {
@@ -226,6 +349,30 @@ bool check_flags(int argc, char ** argv)
             std::cout << "Incorrect use of arguments" << std::endl;
             return false;
           } // catch
+        } else if (argv[arg_index][char_index] == 'c'
+                   && char_index == strlen(argv[arg_index]) - 1
+                   && argc > arg_index) // set number of frames to use in a
+        { // crossfade blend at each transition
+          arg_index++;
+          try
+          {
+            if (s_to_doub(argv[arg_index]) > 1
+                && s_to_doub(argv[arg_index]) < 7)
+            {
+              enable_blending = true;
+              num_frames_to_blend = s_to_doub(argv[arg_index]);
+            } else
+            {
+              std::cout << "Incorrect use of arguments" << std::endl
+                        << "Number of frames in a crossfade blend "
+                        << "must be an integer from 2 to 6" << std::endl;
+              return false;
+            } // else
+          } catch (...)
+          {
+            std::cout << "Incorrect use of arguments" << std::endl;
+            return false;
+          } // catch
         } // else if
       } // for
     } else
@@ -256,6 +403,7 @@ std::vector <std::vector <double>> * distance_matrix(Video & video)
 
   std::cout << "Analysing frames..." << std::endl;
 
+  double max_distance = 0;
   // Iterate through matrix and calculate distances between frames
   for (int row_index = 0; row_index < matrix->size(); row_index++)
   {
@@ -269,7 +417,23 @@ std::vector <std::vector <double>> * distance_matrix(Video & video)
         (*matrix)[row_index][col_index] =
           calculate_distance(video.get_frames()[row_index + 1],
                              video.get_frames()[col_index]);
+        if ((*matrix)[row_index][col_index] > max_distance)
+        {
+          max_distance = (*matrix)[row_index][col_index];
+        } // if
       } // else
+    } // for
+  } // for
+
+  // Change invalid distances of "-1" to the maximum distance
+  for (int row_index = 0; row_index < matrix->size(); row_index++)
+  {
+    for (int col_index = 0; col_index < matrix->size(); col_index++)
+    {
+      if ((*matrix)[row_index][col_index] == -1)
+      {
+        (*matrix)[row_index][col_index] = max_distance;
+      } // if
     } // for
   } // for
   return matrix;
@@ -472,11 +636,13 @@ void display_distance_matrix(std::vector <std::vector <double>> & dist_matrix)
   std::cout << "Displaying distance matrix..." << std::endl;
 
   cv::Mat * image = heat_map(dist_matrix);
-  image = enlarge_matrix(*image);
+  cv::Mat * enlarged_image = enlarge_matrix(*image);
   cv::namedWindow("Display", cv::WINDOW_AUTOSIZE);
   cv::setMouseCallback("Display", on_event, nullptr);
-  cv::imshow("Display", *image);
+  cv::imshow("Display", *enlarged_image);
   cv::waitKey(0);
+  delete image;
+  delete enlarged_image;
 } // function display_distance_matrix
 
 // Displays a heat map representation of a given stochastic/probability matrix
@@ -641,7 +807,7 @@ Video * load_video(std::string file_name)
   return video;
 } // function load_video
 
-void write_video(Video & video, std::string & file_name)
+void write_video(Video & video, std::string file_name)
 {
   std::cout << "Saving output video..." << std::endl; // output for debugging
 
@@ -889,21 +1055,24 @@ std::vector <std::vector <double>> * preserve_dynamics(
 
   int m = weights.size() / 2;
   std::vector <std::vector <double>> * filtered_matrix =
-    new std::vector <std::vector <double>> (
-      matrix.size() - (m + 1), std::vector <double> (matrix.size()
-                                                     - (m + 1), 255));
+    create_square_matrix <double> (matrix.size() - (m + 1), 255);
+
   double total = 0;
   int fil_row_index = 0;
   int fil_col_index = 0;
   for (int row_index = 0; row_index < matrix.size(); row_index++)
   {
-    fil_row_index = 0;
-    fil_col_index = 0;
     for (int col_index = 0; col_index < matrix.size(); col_index++)
     {
       // set correct index values for filtered matrix ****
-      if (row_index >= m && col_index >= m
-          && fil_col_index < filtered_matrix->size())
+      std::cout << "fri = " << fil_row_index << "**  " << filtered_matrix->size() << std::endl; // debugging
+      if (fil_row_index >= filtered_matrix->size())
+      {
+        row_index = matrix.size();
+        std::cout << "exiting" << std::endl; // debugging
+        break;
+      } else if (row_index >= m && col_index >= m
+                 && fil_col_index < filtered_matrix->size())
       {
         fil_col_index++;
       } else if (row_index >= m && col_index >= m
@@ -912,12 +1081,7 @@ std::vector <std::vector <double>> * preserve_dynamics(
       {
         fil_col_index = 0;
         fil_row_index++;
-      } else if (fil_col_index > filtered_matrix->size()
-                 || fil_row_index > filtered_matrix->size())
-      {
-        row_index = matrix.size();
-        break;
-      } // else
+      } // else if
 
       total = 0;
       for (int filter_index = -m; filter_index < m; filter_index++)
@@ -931,11 +1095,47 @@ std::vector <std::vector <double>> * preserve_dynamics(
             * matrix[row_index + filter_index][col_index + filter_index];
         } // if
       } // for
+      std::cout << fil_row_index << ",  " << fil_col_index << std::endl; // debugging
       (*filtered_matrix)[fil_row_index][fil_col_index] = total;
     } // for
   } // for
+  exit(0); // debugging
   return filtered_matrix;
 } // function preserve_dynamics
+
+std::vector <std::vector <double>> * preserve_dynamics2(
+  std::vector <std::vector <double>> & matrix, std::vector <double> & weights)
+{
+  std::cout << "Filtering distance matrix to preserve dynamics..."
+            << std::endl; // output for debugging
+
+  int m = weights.size() / 2;
+  std::vector <std::vector <double>> * filtered_matrix =
+    create_square_matrix <double> (matrix.size() - (m + 1), 255);
+
+  double total = 0;
+  for (int row_index = m; row_index < m + filtered_matrix->size(); row_index++)
+  {
+    for (int col_index = m; col_index < m + filtered_matrix->size();
+         col_index++)
+    {
+      total = 0;
+      for (int filter_index = -m; filter_index < m; filter_index++)
+      {
+        if (row_index + filter_index >= 0
+            && row_index + filter_index < matrix.size()
+            && col_index + filter_index >= 0
+            && col_index + filter_index < matrix.size())
+        {
+          total += weights[filter_index + m]
+            * matrix[row_index + filter_index][col_index + filter_index];
+        } // if
+      } // for
+      (*filtered_matrix)[row_index - m][col_index - m] = total;
+    } // for
+  } // for
+  return filtered_matrix;
+} // function preserve_dynamics2
 
 // Returns a vector consisting of binomial weights to be used as a kernel
 std::vector <double> * filter_weights(int num_weights)
@@ -1028,13 +1228,14 @@ double s_to_doub(std::string string)
     return 0;
   } // if
   return value;
-} // function s_to_doub
+} // function s_to_double
 
 // Displays a list of flags than can be used as command line arguments
 void display_help()
 {
   std::cout << "Correct usage: ./vtg input_video [flags]"
             << std::endl << std::endl
+            << "Input parameters from file: -i" << std::endl
             << "Use luminance as measure of similarity: -l" << std::endl
             << "Equalise video brightness: -b" << std::endl
             << "Stabilise video: -s" << std::endl
@@ -1043,8 +1244,9 @@ void display_help()
             << "Anticipate future costs of transitions: -a" << std::endl
             << "Set tradeoff between making single vs. multiple transitions: "
             << "-t value" << std::endl
-            << "Set relative weight of future transitions: -r value" << std::endl
+            << "Set relative weight of future transitions: -w value" << std::endl
             << "Prune transitions: -p" << std::endl
+            << "Set number of frames in crossfade: -c value" << std::endl
             << "Output file name: -o file_name.avi"
             << std::endl;
 } // function display_help
@@ -1059,6 +1261,12 @@ void select_only_local_maxima(
   int local_min[2] = {-1, -1};
   double max_allowed_distance = average_distance(dist_matrix) * 0.7;
   double max_distance = maximum_component_value <double> (dist_matrix);
+
+  // Zero the diagonal
+  for (int index = 0; index < dist_matrix.size(); index++)
+  {
+    dist_matrix[index][index] = max_distance;
+  } // for
 
   for (int row_index = 0; row_index < dist_matrix.size(); row_index++)
   {
@@ -1080,6 +1288,8 @@ void select_only_local_maxima(
               && row_index - radius + region_row < dist_matrix.size()
               && col_index - radius + region_col >= 0
               && col_index - radius + region_col < dist_matrix.size()
+              && local_min[0] >= 0 && local_min[0] < dist_matrix.size()
+              && local_min[1] >= 0 && local_min[1] < dist_matrix.size()
               && dist_matrix[row_index - radius + region_row]
                             [col_index - radius + region_col]
               < dist_matrix[local_min[0]][local_min[1]])
@@ -1110,6 +1320,86 @@ void select_only_local_maxima(
     } // for
   } // for
 } // function select_only_local_maxima
+
+void select_only_local_maxima2(
+  std::vector <std::vector <double>> & dist_matrix)
+{
+  std::cout << "Pruning the set of possible transitions..." << std::endl;
+
+  double max_distance = maximum_component_value <double> (dist_matrix);
+  int square_size = dist_matrix.size() / 10;
+  int sqr_start_row = 0, sqr_start_col = 0;
+  double sqr_min_row = 0, sqr_min_col = 0;
+  int end_row = 0, end_col = 0;
+
+  // Set the diagonal to the maximal distance so it is not considered
+  for (int index = 0; index < dist_matrix.size(); index++)
+  {
+    dist_matrix[index][index] = max_distance;
+  } // for
+
+  while (true)
+  {
+    sqr_min_row = sqr_start_row;
+    sqr_min_col = sqr_start_col;
+    end_row = sqr_start_row + square_size + dist_matrix.size() % 10;
+    end_col = sqr_start_col + square_size + dist_matrix.size() % 10;
+
+    // Find minimum distance in the square region
+    for (int sqr_row = sqr_start_row;
+         sqr_row < end_row && sqr_row < dist_matrix.size(); sqr_row++)
+    {
+      for (int sqr_col = sqr_start_col;
+           sqr_col < end_col && sqr_col < dist_matrix.size(); sqr_col++)
+      {
+        if (dist_matrix[sqr_row][sqr_col]
+            < dist_matrix[sqr_min_row][sqr_min_col])
+        {
+          sqr_min_row = sqr_row;
+          sqr_min_col = sqr_col;
+        } // if
+      } // for
+    } // for
+
+    // Set all non-minimal distances to the maximum distance
+    for (int sqr_row = sqr_start_row;
+         sqr_row < end_row && sqr_row < dist_matrix.size(); sqr_row++)
+    {
+      for (int sqr_col = sqr_start_col;
+           sqr_col < end_col && sqr_col < dist_matrix.size(); sqr_col++)
+      {
+        if (sqr_row != sqr_min_row || sqr_col != sqr_min_col)
+        {
+          dist_matrix[sqr_row][sqr_col] = max_distance;
+        } // of
+      } // for
+    } // for
+
+    if (end_col < dist_matrix.size())
+    {
+      sqr_start_col = end_col;
+    } else if (end_row < dist_matrix.size())
+    {
+      sqr_start_row = end_row;
+      sqr_start_col = 0;
+    } else
+    {
+      break;
+    } // else
+  } // while
+
+  // Remove (by maximising) the half of the matrix above the identical
+  for (int row_index = 0; row_index < dist_matrix.size(); row_index++)
+  {
+    for (int col_index = 0; col_index < dist_matrix.size(); col_index++)
+    {
+      if (col_index <= row_index - 5)
+      {
+        dist_matrix[row_index][col_index] = max_distance;
+      } // if
+    } // for
+  } // for
+} // function select_only_local_maxima2
 
 template <class T>
 T matrix_total(std::vector <std::vector <T>> & matrix)
@@ -1154,9 +1444,10 @@ std::list <struct Transition> * lowest_average_cost_transitions(
   std::cout << "Sorting transitions based on average cost..." << std::endl;
 
   double max_distance = maximum_component_value <double> (dist_matrix);
-  std::list <struct Transition> transitions = std::list <struct Transition> ();
+  std::list <struct Transition> transitions;
   std::list <struct Transition> * best_transitions =
     new std::list <struct Transition> ();
+  struct Transition * current_transition = nullptr;
 
   // Calculates average cost for all remaining transitions
   for (int row_index = 0; row_index < dist_matrix.size(); row_index++)
@@ -1168,18 +1459,18 @@ std::list <struct Transition> * lowest_average_cost_transitions(
       {
         continue;
       } // if
-      struct Transition current_transition;
+      current_transition = new struct Transition();
       if (row_index > col_index) // only backwards transitions are allowed
       {
-        current_transition.source = row_index;
-        current_transition.destination = col_index;
+        current_transition->source = row_index;
+        current_transition->destination = col_index;
       } else
       {
-        current_transition.source = col_index;
-        current_transition.destination = row_index;
+        current_transition->source = col_index;
+        current_transition->destination = row_index;
       } // else
-      current_transition.average_cost = dist_matrix[row_index][col_index];
-      transitions.push_back(current_transition);
+      current_transition->average_cost = dist_matrix[row_index][col_index];
+      transitions.push_back(*current_transition);
     } // for
   } // for
 
@@ -1222,27 +1513,30 @@ std::vector <T> * vector_from_list(std::list <T> & list)
 } // function vector_from_list
 
 // Creates and returns a dynamic programming table used to find optimal loops
-std::vector <std::vector <CompoundLoop>> * dp_table(
+std::vector <std::vector <struct CompoundLoop>> * dp_table(
   std::list <struct Transition> & transition_list, int max_loop_length)
 {
   std::cout << "Selecting a set of transitions to use..." << std::endl;
 
+  // Find the maximum primitive loop length
+  int max_primitive_loop_length = max_loop_length;
+  for (std::list <struct Transition> ::const_iterator it =
+        transition_list.begin(); it != transition_list.end(); it++)
+  {
+    if (transition_length(*it) > max_primitive_loop_length)
+    {
+      max_primitive_loop_length = transition_length(*it);
+    } // if
+  } // for
+  max_primitive_loop_length *= 3;
+
   // Store transitions in a vector and initialise the DP table
   std::vector <struct Transition> * transitions =
     vector_from_list <struct Transition> (transition_list);
-  std::vector <std::vector <CompoundLoop>> * table =
-    new std::vector <std::vector <CompoundLoop>> (
-      max_loop_length + 1, // row 0 is left empty
-      std::vector <CompoundLoop> (transitions->size()));
-
-  // Initialise compound loop costs
-  for (int row = 0; row <= max_loop_length; row++)
-  {
-    for (int col = 0; col < transitions->size(); col++)
-    {
-      (*table)[row][col].total_cost = 0;
-    } // for
-  } // for
+  std::vector <std::vector <struct CompoundLoop>> * table =
+    new std::vector <std::vector <struct CompoundLoop>> (
+      max_primitive_loop_length + 1, // row 0 is left empty
+      std::vector <struct CompoundLoop> (transitions->size()));
 
   // Add primitive loops to their columns
   int length = 0;
@@ -1257,11 +1551,10 @@ std::vector <std::vector <CompoundLoop>> * dp_table(
   struct CompoundLoop * lowest_cost_loop = nullptr;
   struct CompoundLoop * loop_considered = nullptr;
   int compound_length = 0;
-  for (int row = 1; row <= max_loop_length; row++)
+  for (int row = 1; row <= max_primitive_loop_length; row++)
   {
     for (int col = 0; col < transitions->size(); col++)
     {
-
       // Skip cells of length less than the column's primitive loop length
       if (row < transition_length((*transitions)[col]))
       {
@@ -1273,6 +1566,11 @@ std::vector <std::vector <CompoundLoop>> * dp_table(
       // Check compound loops of shorter length in same column
       for (int offset = 1; offset < row; offset++)
       {
+        if ((*table)[row - offset][col].total_cost == 0)
+        {
+          continue;
+        } // if
+
         if (row - offset > 0
             && row >= transition_length((*transitions)[col]))
         {
@@ -1289,9 +1587,10 @@ std::vector <std::vector <CompoundLoop>> * dp_table(
               continue;
             } // if
 
-            for (int cmp_row = 0; cmp_row < max_loop_length; cmp_row++)
+            for (int cmp_row = 1; cmp_row <= max_primitive_loop_length;
+                 cmp_row++)
             {
-              if ((*table)[row - offset][col].total_cost == 0)
+              if ((*table)[cmp_row][cmp_col].total_cost == 0)
               {
                 continue;
               } else
@@ -1516,33 +1815,422 @@ std::list <std::list <struct Transition>> * continuous_ranges(
   return ranges;
 } // function continuous_ranges
 
-std::vector <cv::Mat> * create_loop_frame_sequence(struct CompoundLoop & loop)
+struct PreRenderedSequence * create_loop_frame_sequence(
+  struct CompoundLoop & loop, std::string filename)
 {
+  std::ofstream file (filename);
   std::cout << "Generating frame sequence from the compound loop..."
             << std::endl; // output for debugging
 
   std::list <struct Transition> ::const_iterator trans_it;
   std::list <cv::Mat> frames;
+  std::list <int> transition_points;
+  int frame_counter = 0;
   int start_frame = 0;
   int end_frame = 0;
+  int frame_index = 0;
+
   for (trans_it = loop.transitions.begin();
        trans_it != loop.transitions.end(); trans_it++)
   {
-    start_frame = (*trans_it).destination + 1;
-    if (trans_it == std::prev(loop.transitions.end()))
+    start_frame = trans_it == loop.transitions.begin() ?
+      loop.transitions.back().destination + 1
+      : (*std::prev(trans_it)).destination + 1;
+    end_frame = (*trans_it).source - 1;
+    for (frame_index = start_frame; frame_index < end_frame; frame_index++)
     {
-      end_frame = loop.transitions.front().source;
-    } else
-    {
-      end_frame = (*std::next(trans_it)).source;
-    } // else
-
+      file << frame_index << std::endl;
+      frames.push_back(input_video->get_frames()[frame_index]);
+      frame_counter++;
+    } // for
+    transition_points.push_back(frame_counter);
     frames.push_back(input_video->get_frames()[(*trans_it).source]);
     frames.push_back(input_video->get_frames()[(*trans_it).destination]);
-    for (int frame_index = start_frame; frame_index < end_frame; frame_index++)
+    file << (*trans_it).source << " ->  " << (*trans_it).destination << std::endl;
+    frame_counter += 2;
+  } // for
+
+  file.close();
+  struct PreRenderedSequence * sequence = new struct PreRenderedSequence;
+  sequence->frames = vector_from_list <cv::Mat> (frames);
+  sequence->transitions = transition_points;
+  return sequence;
+} // function create_loop_frame_sequence
+
+cv::Mat blend_frames(cv::Mat & frame_a, float alpha, cv::Mat & frame_b,
+                     float beta)
+{
+  cv::Mat result = frame_a.clone();
+  int rows = frame_a.rows;
+  int cols = frame_a.cols;
+  int channels = frame_a.channels();
+  if (frame_a.isContinuous())
+  {
+    cols *= rows;
+    rows = 1;
+  } // if
+
+  uchar * row_a, * row_b, * result_row;
+  for (int row_index = 0; row_index < rows; row_index++)
+  {
+    row_a = frame_a.ptr <uchar> (row_index);
+    row_b = frame_b.ptr <uchar> (row_index);
+    result_row = result.ptr <uchar> (row_index);
+    for (int pix_index = 0; pix_index < cols * channels;
+         pix_index += 3)
     {
-      frames.push_back(input_video->get_frames()[frame_index]);
+      result_row[pix_index] = (uchar)((float) row_a[pix_index] * alpha
+        + (float) row_b[pix_index] * beta);
+      result_row[pix_index + 1] = (uchar)((float) row_a[pix_index + 1] * alpha
+        + (float) row_b[pix_index + 1] * beta);
+      result_row[pix_index + 2] = (uchar)((float) row_a[pix_index + 2] * alpha
+        + (float) row_b[pix_index + 2] * beta);
     } // for
   } // for
-  return vector_from_list <cv::Mat> (frames);
-} // function create_loop_frame_sequence
+  return result;
+} // function blend_frames
+
+std::vector <cv::Mat> * blend_frames_at_transitions(
+  std::vector <cv::Mat> & frames, std::list <int> & transition_points,
+  int frames_per_blend)
+{
+  std::cout << "Blending frames at transition points..." << std::endl;
+
+  std::vector <cv::Mat> * previous_frames = new std::vector <cv::Mat>();
+  *previous_frames = frames;
+  std::vector <cv::Mat> * current_frames = new std::vector <cv::Mat>();
+  *current_frames = *previous_frames;
+
+  std::vector <float> * weights = nullptr;
+  if (frames_per_blend == 4)
+  {
+    weights = new std::vector <float> (4);
+    (*weights)[0] = 0.5;
+    (*weights)[1] = 0.3;
+    (*weights)[2] = 0.1;
+    (*weights)[3] = 0.1;
+  } else if (frames_per_blend == 6)
+  {
+    weights = new std::vector <float> (6);
+    (*weights)[0] = 0.4;
+    (*weights)[1] = 0.2;
+    (*weights)[2] = 0.1;
+    (*weights)[3] = 0.1;
+    (*weights)[4] = 0.1;
+    (*weights)[5] = 0.1;
+  } else // 2 frames per blend
+  {
+    frames_per_blend = 2;
+    weights = new std::vector <float> (2);
+    (*weights)[0] = 0.6;
+    (*weights)[1] = 0.4;
+  } // else
+  alpha_weights = weights;
+  int current_frames_per_blend = frames_per_blend;
+
+  std::list <int> ::const_iterator it;
+  for (it = transition_points.begin(); it != transition_points.end(); it++)
+  {
+    // Blend frames
+    uchar * row = nullptr;
+    float blue = 0, green = 0, red = 0;
+    int max_blue = 0, max_green = 0, max_red = 0;
+    for (int centre_frame = *it - current_frames_per_blend / 2 + 1;
+         centre_frame < *it + current_frames_per_blend / 2 + 1; centre_frame++)
+    {
+      for (int row_index = 0; row_index < input_video->get_frame_height();
+           row_index++)
+      {
+        row = (*current_frames)[correct_frame_index(
+          frames.size(), centre_frame)].ptr <uchar> (row_index);
+        for (int pix_index = 0;
+             pix_index < input_video->get_frame_width(); pix_index++)
+        {
+          blue = 0; green = 0; red = 0;
+          max_blue = 0; max_green = 0; max_red = 0;
+          for (int frame_index = *it - current_frames_per_blend / 2 + 1;
+               frame_index < *it + current_frames_per_blend / 2 + 1;
+               frame_index++)
+          {
+            // Calculate maximum RGB values
+            if (((*previous_frames)[correct_frame_index(
+                  frames.size(), frame_index)].at <cv::Vec3b> (
+                    row_index, pix_index))[0] > max_blue)
+            {
+              max_blue = ((*previous_frames)[correct_frame_index(
+                frames.size(), frame_index)].at <cv::Vec3b> (
+                  row_index, pix_index))[0];
+            } // if
+            if (((*previous_frames)[correct_frame_index(
+                  frames.size(), frame_index)].at <cv::Vec3b> (
+                    row_index, pix_index))[1] > max_green)
+            {
+              max_green = ((*previous_frames)[correct_frame_index(
+                frames.size(), frame_index)].at <cv::Vec3b> (
+                  row_index, pix_index))[1];
+            } // if
+            if (((*previous_frames)[correct_frame_index(
+                  frames.size(), frame_index)].at <cv::Vec3b> (
+                    row_index, pix_index))[2] > max_red)
+            {
+              max_red = ((*previous_frames)[correct_frame_index(
+                frames.size(), frame_index)].at <cv::Vec3b> (
+                  row_index, pix_index))[2];
+            } // if
+
+            // Add contributions of each frame to the blended frame
+            blue += (*weights)[std::abs(centre_frame - frame_index)]
+              * ((*previous_frames)[correct_frame_index(
+                   frames.size(), frame_index)].at <cv::Vec3b> (
+                      row_index, pix_index))[0];
+            green += (*weights)[std::abs(centre_frame - frame_index)]
+              * ((*previous_frames)[correct_frame_index(
+                   frames.size(), frame_index)].at <cv::Vec3b> (
+                     row_index, pix_index))[1];
+            red += (*weights)[std::abs(centre_frame - frame_index)]
+              * ((*previous_frames)[correct_frame_index(
+                   frames.size(), frame_index)].at <cv::Vec3b> (
+                     row_index, pix_index))[2];
+          } // for
+          row[pix_index * 3] = ((int)blue <= max_blue) ? blue : max_blue;
+          row[pix_index * 3 + 1] = ((int)green <= max_green) ? green
+            : max_green;
+          row[pix_index * 3 + 2] = ((int)red <= max_red) ? red : max_red;
+        } // for
+      } // for
+    } // for
+
+    delete previous_frames;
+    previous_frames = current_frames;
+    *current_frames = *previous_frames;
+  } // for
+
+  return current_frames;
+} // function blend_frames_at_transitions
+
+int correct_frame_index(int sequence_length, int frame_index)
+{
+  if (frame_index > sequence_length - 1)
+  {
+    return frame_index - sequence_length;
+  } else if (frame_index < 0)
+  {
+    return sequence_length + frame_index;
+  } // else if
+  return frame_index;
+} // function correct_frame_number
+
+void save_parameters(std::string filepath)
+{
+  std::ofstream file (filepath);
+  file << "Brightness equalised = " << equalise_brightness
+       << "\nTap filter size = " << tap_filter
+       << "\nMultiple transition tradeoff = " << multiple_trans_tradeoff
+       << "\nRelative weight of future transitions = "
+       << relative_weight_future_trans
+       << "\nNumber frames per transition blend = " << num_frames_to_blend;
+  if (alpha_weights != nullptr)
+  {
+    file << "\nBlend weights = [   ";
+    for (int index = 0; index < alpha_weights->size(); index++)
+    {
+      file << (*alpha_weights)[index] << "   ";
+    } // for
+    file << " ]";
+  } // if
+  file.close();
+} // function save_parameters
+
+void save_transition_pairs(std::vector <cv::Mat> & frames,
+                           std::list <int> & transitions, std::string filepath)
+{
+  int transition_num = 1;
+  std::list <int> ::iterator it;
+  for (it = transitions.begin(); it != transitions.end(); it++)
+  {
+    cv::imwrite(filepath + "/" + std::to_string(transition_num) + "_a.jpg",
+                frames[*it]);
+    cv::imwrite(filepath + "/" + std::to_string(transition_num) + "_b.jpg",
+                frames[*it + 1]);
+    transition_num++;
+  } // for
+} // save_transition_pairs
+
+void setup_output_dirs(std::string filepath)
+{
+  boost::filesystem::create_directory(filepath);
+} // function setup_output_dirs
+
+void save_matrix(std::vector <std::vector <double>> & matrix,
+                 std::string filepath)
+{
+  cv::Mat * image = heat_map(matrix);
+  image = enlarge_matrix(*image);
+  cv::imwrite(filepath, *image);
+} // function save_matrix
+
+std::string output_name()
+{
+  std::string name = "";
+  if (sim_measure == rgb)
+  {
+    name.push_back('r');
+  } else
+  {
+    name.push_back('y');
+  } // else
+
+  if (equalise_brightness)
+  {
+    name.push_back('B');
+  } else
+  {
+    name.push_back('b');
+  } // else
+
+  char mtp[7];
+  char rwft[7];
+  sprintf(mtp, "%.2f", multiple_trans_tradeoff);
+  sprintf(rwft, "%.2f", relative_weight_future_trans);
+  name += "f" + std::to_string(tap_filter);
+  name += "t" + std::string(mtp);
+  name += "w" + std::string(rwft);
+  name += "c" + std::to_string(num_frames_to_blend);
+  return name;
+} // function output_name
+
+void save_distance_values(std::vector <std::vector <double>> & matrix,
+                          std::string filepath)
+{
+  std::cout << "Saving distance values to file..." << std::endl;
+
+  std::ofstream file (filepath);
+  for (int row_index = 0; row_index < matrix.size(); row_index++)
+  {
+    for (int col_index = 0; col_index < matrix.size(); col_index++)
+    {
+      file << std::setprecision(20) << matrix[row_index][col_index] << ",";
+    } // for
+    file << std::endl;
+  } // for
+  file.close();
+} // function save_distance_values
+
+std::vector <std::vector <double>> * load_distance_matrix(
+  std::string filepath)
+{
+  std::cout << "Loading distance matrix from file..." << std::endl;
+
+  std::vector <std::vector <double>> * matrix = nullptr;
+  std::list <std::list <double>> rows;
+  std::list <double> current_row;
+  std::ifstream file (filepath.c_str());
+  char current_char = '\0';
+  char prev_char = '\0';
+  std::string current_value = "";
+  while (file.get(current_char))
+  {
+    if (current_char == '\n')
+    {
+      if (prev_char != ',' && current_value != "")
+      {
+        current_row.push_back(std::stod(current_value));
+        current_value = "";
+      } // if
+      if (!current_row.empty())
+      {
+        rows.push_back(current_row);
+        current_row.clear();
+      } // if
+    } else if (current_char == ',')
+    {
+      current_row.push_back(std::stod(current_value));
+      current_value = "";
+    } else if (isdigit(current_char) || current_char == '.'
+               || current_char == 'e' || current_char == '+')
+    {
+      current_value.push_back(current_char);
+    } // else
+    prev_char = current_char;
+  } // while
+  file.close();
+
+  matrix = create_square_matrix <double> (input_video->get_frames().size(), 0);
+  std::vector <double> * vector_row = nullptr;
+  std::list <std::list <double>> ::const_iterator row_it = rows.begin();
+  std::list <double> ::const_iterator val_it;
+  for (int row_index = 0;
+       row_index < matrix->size() && row_it != rows.end();
+       row_index++, row_it++)
+  {
+    val_it = (*row_it).begin();
+    for (int col_index = 0;
+         col_index < matrix->size() && val_it != (*row_it).end();
+         col_index++, val_it++)
+    {
+      (*matrix)[row_index][col_index] = *val_it;
+    } // for
+  } // for
+  return matrix;
+} // function load_distance_matrix
+
+void load_parameters_from_string(std::string parameters)
+{
+  std::cout << "Setting parameters for current test..." << std::endl;
+
+  std::string current_value = "";
+  char param_type = '\0';
+  for (int index = 0; index < parameters.size(); index++)
+  {
+    if (isalpha(parameters[index]) && parameters[index + 1] == '=')
+    {
+      param_type = parameters[index];
+      index++;
+    } else if (parameters[index] == ',' || index == parameters.size() - 1)
+    {
+      if (parameters[index] != ',' && index == parameters.size() - 1)
+      {
+        current_value.push_back(parameters[index]);
+      } // if
+      switch (param_type)
+      {
+        case 'r':
+          sim_measure = std::stoi(current_value) == 0 ? rgb : luminance;
+          break;
+        case 'b':
+          equalise_brightness = std::stoi(current_value);
+          break;
+        case 'c':
+          num_frames_to_blend = std::stoi(current_value);
+          break;
+        case 't':
+          multiple_trans_tradeoff = std::stod(current_value);
+          break;
+        case 'f':
+          tap_filter = std::stoi(current_value);
+          break;
+        case 'w':
+          relative_weight_future_trans = std::stod(current_value);
+          break;
+        default: break;
+      } // switch
+      current_value = "";
+    } else if (isdigit(parameters[index]) || parameters[index] == '.')
+    {
+      current_value.push_back(parameters[index]);
+    } // else if
+  } // for
+} // function load_parameters_from_string
+
+std::list <std::string> load_parameters_from_file(std::string filename)
+{
+  std::ifstream file (filename);
+  std::list <std::string> parameter_sets;
+  char buffer[200];
+  while (file.getline(buffer, 200))
+  {
+    parameter_sets.push_back(std::string(buffer));
+  } // while
+  file.close();
+  return parameter_sets;
+} // function load_parameters_from_file
