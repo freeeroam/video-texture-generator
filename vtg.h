@@ -48,6 +48,14 @@ struct PreRenderedSequence
   std::list <int> transitions;
 }; // struct PreRenderedSequence
 
+struct LoopFrame
+{
+  unsigned int frame_num; // frame no. in the original input video
+  bool transition_point;
+
+  LoopFrame() : frame_num(0), transition_point(false) {}
+}; // struct LoopFrame
+
 // Different measures of similarity
 enum similarity_measure : unsigned int
 {
@@ -132,7 +140,7 @@ struct Transition remove_latest_transition(
   std::list <struct Transition> & transitions);
 std::list <std::list <struct Transition>> * continuous_ranges(
   std::list <struct Transition> transitions);
-struct PreRenderedSequence * create_loop_frame_sequence(
+std::vector <struct LoopFrame> * create_loop_frame_sequence(
   struct CompoundLoop & loop, std::string filename);
 cv::Mat blend_frames(cv::Mat & frame_a, float alpha, cv::Mat & frame_b,
                      float beta);
@@ -142,7 +150,7 @@ cv::vector <cv::Mat> * blend_frames_at_transitions(
 int correct_frame_index(int sequence_length, int frame_index);
 void save_parameters(std::string filepath);
 void save_transition_pairs(std::vector <cv::Mat> & frames,
-                           std::list <int> & transitions,
+                           std::vector <struct LoopFrame> & sequence,
                            std::string filepath);
 void setup_output_dirs(std::string filepath);
 void save_matrix(std::vector <std::vector <double>> & matrix,
@@ -154,3 +162,7 @@ std::vector <std::vector <double>> * load_distance_matrix(
   std::string filepath);
 void load_parameters_from_string(std::string parameters);
 std::list <std::string> load_parameters_from_file(std::string filename);
+void save_images(std::vector <cv::Mat> & images, std::string filepath);
+std::vector <cv::Mat> * blend_transitions(
+  std::vector <struct LoopFrame> & frames, std::vector <float> weights);
+std::vector <float> crossfade_weights(int num_frames_in_blend);

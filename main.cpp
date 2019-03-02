@@ -42,6 +42,7 @@ int main(int argc, char ** argv)
     std::cout << "Input file provided is not a valid video." << std::endl;
     return 0;
   } // if
+  apply_preprocessing(*input_video);
 
   // Save distance matrix and matrix distance values if not already saved
   boost::filesystem::path distances_txt (output_file_path + "/distances.txt");
@@ -86,9 +87,10 @@ int main(int argc, char ** argv)
   std::vector <std::vector<struct CompoundLoop>> * loop_table = nullptr;
   std::list <struct Transition> * best_transitions = nullptr;
   std::vector <double> * weights = nullptr;
-  struct PreRenderedSequence * sequence = nullptr;
+  std::vector <struct LoopFrame> * sequence = nullptr;
   struct CompoundLoop compound_loop;
   std::vector <cv::Mat> * output_frames = nullptr;
+  std::vector <float> blend_weights;
   for (test_it = test_parameters.begin(); test_it != test_parameters.end();
        test_it++)
   {
@@ -96,7 +98,6 @@ int main(int argc, char ** argv)
     std::cout << "Output will be saved to: " << output_file_path << "/"
               << output_name() << std::endl; // output for debugging
 
-    apply_preprocessing(*input_video);
     if (tap_filter > 0)
     {
       weights = filter_weights(tap_filter * 2);
@@ -145,14 +146,22 @@ int main(int argc, char ** argv)
                                                 + std::to_string(row_index)
                                                 + "/transitions.txt");
 
+
           // Blend frames if blending is enabled
           if (enable_blending)
           {
-            output_frames = blend_frames_at_transitions(*(sequence->frames),
-                                                        sequence->transitions, 4);
+            blend_weights = crossfade_weights(num_frames_to_blend);
+            output_frames =
+              blend_transitions(*sequence, blend_weights);
           } else
           {
-            output_frames = sequence->frames;
+            output_frames = new std::vector <cv::Mat> (sequence->size());
+            for (int frame_index = 0; frame_index < output_frames->size();
+                 frame_index++)
+            {
+              (*output_frames)[frame_index] =
+                input_video->get_frames()[(*sequence)[frame_index].frame_num];
+            } // for
           } // else
 
           // Produce output video
@@ -171,7 +180,17 @@ int main(int argc, char ** argv)
                                               + std::to_string(videos_produced)
                                               + "l" + std::to_string(row_index)
                                               + "/transition_pairs");
-          save_transition_pairs(*(sequence->frames), sequence->transitions,
+          boost::filesystem::create_directory(output_file_path + "/"
+                                              + output_name() + "/"
+                                              + std::to_string(videos_produced)
+                                              + "l" + std::to_string(row_index)
+                                              + "/frames");
+          save_images(output_video.get_frames(), output_file_path + "/"
+                      + output_name() + "/"
+                      + std::to_string(videos_produced)
+                      + "l" + std::to_string(row_index)
+                      + "/frames");
+          save_transition_pairs(*output_frames, *sequence,
                                 output_file_path + "/" + output_name()
                                 + "/" + std::to_string(videos_produced) + "l"
                                 + std::to_string(row_index) + "/transition_pairs");
@@ -389,7 +408,7 @@ void apply_preprocessing(Video & video)
 {
   if (equalise_brightness)
   {
-    cv::Mat reference_image = find_reference_image(*input_video, 4);
+    cv::Mat reference_image = find_reference_image(*input_video, 2);
     equalise_video_brightness(video, reference_image);
   } // if
 } // function apply_preprocessing
@@ -1815,7 +1834,7 @@ std::list <std::list <struct Transition>> * continuous_ranges(
   return ranges;
 } // function continuous_ranges
 
-struct PreRenderedSequence * create_loop_frame_sequence(
+std::vector <struct LoopFrame> * create_loop_frame_sequence(
   struct CompoundLoop & loop, std::string filename)
 {
   std::ofstream file (filename);
@@ -1823,9 +1842,7 @@ struct PreRenderedSequence * create_loop_frame_sequence(
             << std::endl; // output for debugging
 
   std::list <struct Transition> ::const_iterator trans_it;
-  std::list <cv::Mat> frames;
-  std::list <int> transition_points;
-  int frame_counter = 0;
+  std::list <struct LoopFrame> frames;
   int start_frame = 0;
   int end_frame = 0;
   int frame_index = 0;
@@ -1839,22 +1856,23 @@ struct PreRenderedSequence * create_loop_frame_sequence(
     end_frame = (*trans_it).source - 1;
     for (frame_index = start_frame; frame_index < end_frame; frame_index++)
     {
+      struct LoopFrame frame;
+      frame.frame_num = frame_index;
       file << frame_index << std::endl;
-      frames.push_back(input_video->get_frames()[frame_index]);
-      frame_counter++;
+      frames.push_back(frame);
     } // for
-    transition_points.push_back(frame_counter);
-    frames.push_back(input_video->get_frames()[(*trans_it).source]);
-    frames.push_back(input_video->get_frames()[(*trans_it).destination]);
-    file << (*trans_it).source << " ->  " << (*trans_it).destination << std::endl;
-    frame_counter += 2;
+    struct LoopFrame source_frame;
+    source_frame.frame_num = (*trans_it).source;
+    source_frame.transition_point = true;
+    struct LoopFrame dest_frame;
+    dest_frame.frame_num = (*trans_it).destination;
+    frames.push_back(source_frame);
+    frames.push_back(dest_frame);
+    file << (*trans_it).source << " ->  " << (*trans_it).destination << std::endl; // debugging
   } // for
-
   file.close();
-  struct PreRenderedSequence * sequence = new struct PreRenderedSequence;
-  sequence->frames = vector_from_list <cv::Mat> (frames);
-  sequence->transitions = transition_points;
-  return sequence;
+
+  return vector_from_list <struct LoopFrame> (frames);
 } // function create_loop_frame_sequence
 
 cv::Mat blend_frames(cv::Mat & frame_a, float alpha, cv::Mat & frame_b,
@@ -1899,7 +1917,7 @@ std::vector <cv::Mat> * blend_frames_at_transitions(
   std::vector <cv::Mat> * previous_frames = new std::vector <cv::Mat>();
   *previous_frames = frames;
   std::vector <cv::Mat> * current_frames = new std::vector <cv::Mat>();
-  *current_frames = *previous_frames;
+  *current_frames = frames;
 
   std::vector <float> * weights = nullptr;
   if (frames_per_blend == 4)
@@ -1929,12 +1947,15 @@ std::vector <cv::Mat> * blend_frames_at_transitions(
   int current_frames_per_blend = frames_per_blend;
 
   std::list <int> ::const_iterator it;
+  // *it is the actual frame at which the transition begins
   for (it = transition_points.begin(); it != transition_points.end(); it++)
   {
-    // Blend frames
+    std::cout << "trans str: " << std::to_string(*it) << std::endl; // debugging
+    // go through neighbouring frames and blend them
     uchar * row = nullptr;
     float blue = 0, green = 0, red = 0;
     int max_blue = 0, max_green = 0, max_red = 0;
+    int weight_index = 0;
     for (int centre_frame = *it - current_frames_per_blend / 2 + 1;
          centre_frame < *it + current_frames_per_blend / 2 + 1; centre_frame++)
     {
@@ -1946,6 +1967,7 @@ std::vector <cv::Mat> * blend_frames_at_transitions(
         for (int pix_index = 0;
              pix_index < input_video->get_frame_width(); pix_index++)
         {
+          // Go through neighbouring frames
           blue = 0; green = 0; red = 0;
           max_blue = 0; max_green = 0; max_red = 0;
           for (int frame_index = *it - current_frames_per_blend / 2 + 1;
@@ -1979,38 +2001,44 @@ std::vector <cv::Mat> * blend_frames_at_transitions(
             } // if
 
             // Add contributions of each frame to the blended frame
-            blue += (*weights)[std::abs(centre_frame - frame_index)]
+            weight_index = std::abs(correct_frame_index(frames.size(),
+                                                        centre_frame)
+                                    - correct_frame_index(frames.size(),
+                                                          frame_index));
+            std::cout << "weight index: " << weight_index << std::endl; // debugging
+            blue += (*weights)[weight_index]
               * ((*previous_frames)[correct_frame_index(
                    frames.size(), frame_index)].at <cv::Vec3b> (
                       row_index, pix_index))[0];
-            green += (*weights)[std::abs(centre_frame - frame_index)]
+            green += (*weights)[weight_index]
               * ((*previous_frames)[correct_frame_index(
                    frames.size(), frame_index)].at <cv::Vec3b> (
                      row_index, pix_index))[1];
-            red += (*weights)[std::abs(centre_frame - frame_index)]
+            red += (*weights)[weight_index]
               * ((*previous_frames)[correct_frame_index(
                    frames.size(), frame_index)].at <cv::Vec3b> (
                      row_index, pix_index))[2];
           } // for
+
           row[pix_index * 3] = ((int)blue <= max_blue) ? blue : max_blue;
           row[pix_index * 3 + 1] = ((int)green <= max_green) ? green
             : max_green;
           row[pix_index * 3 + 2] = ((int)red <= max_red) ? red : max_red;
+
         } // for
       } // for
     } // for
 
-    delete previous_frames;
-    previous_frames = current_frames;
-    *current_frames = *previous_frames;
+    *previous_frames = *current_frames;
   } // for
+  delete previous_frames;
 
   return current_frames;
 } // function blend_frames_at_transitions
 
 int correct_frame_index(int sequence_length, int frame_index)
 {
-  if (frame_index > sequence_length - 1)
+  if (frame_index >= sequence_length)
   {
     return frame_index - sequence_length;
   } else if (frame_index < 0)
@@ -2042,17 +2070,20 @@ void save_parameters(std::string filepath)
 } // function save_parameters
 
 void save_transition_pairs(std::vector <cv::Mat> & frames,
-                           std::list <int> & transitions, std::string filepath)
+                           std::vector <struct LoopFrame> & sequence,
+                           std::string filepath)
 {
   int transition_num = 1;
-  std::list <int> ::iterator it;
-  for (it = transitions.begin(); it != transitions.end(); it++)
+  for (int index = 0; index < sequence.size(); index++)
   {
-    cv::imwrite(filepath + "/" + std::to_string(transition_num) + "_a.jpg",
-                frames[*it]);
-    cv::imwrite(filepath + "/" + std::to_string(transition_num) + "_b.jpg",
-                frames[*it + 1]);
-    transition_num++;
+    if (sequence[index].transition_point)
+    {
+      cv::imwrite(filepath + "/" + std::to_string(transition_num) + "_a.jpg",
+                  frames[correct_frame_index(sequence.size(), index)]);
+      cv::imwrite(filepath + "/" + std::to_string(transition_num) + "_b.jpg",
+                  frames[correct_frame_index(sequence.size(), index + 1)]);
+      transition_num++;
+    } // if
   } // for
 } // save_transition_pairs
 
@@ -2234,3 +2265,102 @@ std::list <std::string> load_parameters_from_file(std::string filename)
   file.close();
   return parameter_sets;
 } // function load_parameters_from_file
+
+void save_images(std::vector <cv::Mat> & images, std::string filepath)
+{
+  for (int index = 0; index < images.size(); index++)
+  {
+    cv::imwrite(filepath + '/' + std::to_string(index) + ".jpg", images[index]);
+  } // for
+} // function save_frame_images
+
+std::vector <cv::Mat> * blend_transitions(
+  std::vector <struct LoopFrame> & frames, std::vector <float> weights)
+{
+  std::vector <cv::Mat> * blended =
+    new std::vector <cv::Mat> (frames.size());
+
+  // Initialise frames
+  for (int frame_index = 0; frame_index < blended->size(); frame_index++)
+  {
+    (*blended)[frame_index] =
+      input_video->get_frames()[frames[frame_index].frame_num];
+  } // for
+
+  // Blend frames
+  int weight_index = 0;
+  for (int frame_index = 0; frame_index < frames.size(); frame_index++)
+  {
+    if (frames[frame_index].transition_point)
+    {
+      weight_index = 0;
+      for (int offset = 1 - std::floor(weights.size() / 2);
+           offset <= std::floor(weights.size() / 2); offset++)
+      {
+        (*blended)[correct_frame_index(frames.size(), frame_index + offset)] =
+          blend_frames(input_video->get_frames()[correct_frame_index(
+            frames.size(), frames[frame_index].frame_num + offset)],
+          weights[weight_index],
+          input_video->get_frames()[correct_frame_index(
+            frames.size(),
+            frames[correct_frame_index(frames.size(), frame_index + 1)].frame_num
+                   + offset - 1)],
+          1 - weights[weight_index]);
+        weight_index++;
+      } // for
+    } // if
+  } // for
+  return blended;
+} // function blend_transitions
+
+std::vector <float> crossfade_weights(int num_frames_in_blend)
+{
+  if (num_frames_in_blend > 8)
+  {
+    num_frames_in_blend = 8;
+  } else if (num_frames_in_blend < 2)
+  {
+    num_frames_in_blend = 2;
+  } else if (num_frames_in_blend % 2 == 1)
+  {
+    num_frames_in_blend = num_frames_in_blend - 1 > 1
+      ? num_frames_in_blend - 1 : 2;
+  } // if
+  std::vector <float> weights (num_frames_in_blend);
+  alpha_weights = new std::vector <float> (num_frames_in_blend);
+  switch (num_frames_in_blend)
+  {
+    case 8:
+      weights[0] = 0.95;
+      weights[1] = 0.8;
+      weights[2] = 0.65;
+      weights[3] = 0.5;
+      weights[4] = 0.5;
+      weights[5] = 0.35;
+      weights[6] = 0.2;
+      weights[7] = 0.05;
+      *alpha_weights = weights;
+      return weights;
+    case 6:
+      weights[0] = 0.9;
+      weights[1] = 0.7;
+      weights[2] = 0.5;
+      weights[3] = 0.5;
+      weights[4] = 0.3;
+      weights[5] = 0.1;
+      *alpha_weights = weights;
+      return weights;
+    case 4:
+      weights[0] = 0.75;
+      weights[1] = 0.5;
+      weights[2] = 0.5;
+      weights[3] = 0.25;
+      *alpha_weights = weights;
+      return weights;
+    case 2:
+      weights[0] = 0.5;
+      weights[1] = 0.5;
+      *alpha_weights = weights;
+      return weights;
+  } // switch
+} // function crossfade_weights
