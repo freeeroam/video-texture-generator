@@ -7,6 +7,7 @@
 #include <boost/filesystem.hpp>
 #include <iomanip>
 
+/* Configuration options */
 enum similarity_measure sim_measure = rgb;
 Video * input_video = nullptr;
 bool equalise_brightness = false;
@@ -18,6 +19,9 @@ double relative_weight_future_trans = 0.99;
 int min_matrix_display_size = 500;
 bool prune_transitions = true;
 bool enable_blending = true;
+bool show_distance_matrix = false;
+bool show_pd_matrix = false;
+bool show_anticipated_matrix = false;
 int num_frames_to_blend = 2;
 std::vector <float> * alpha_weights = nullptr;
 std::string output_file_path =
@@ -60,6 +64,11 @@ int main(int argc, char ** argv)
     save_matrix(*distances, output_file_path + "/distances.png");
   } // if
 
+  if (show_distance_matrix)
+  {
+    display_distance_matrix(*distances);
+  } // if
+
   // Get sets of program parameters from files or from program arguments
   if (parameters_file != "")
   {
@@ -84,6 +93,7 @@ int main(int argc, char ** argv)
   std::list <std::string> ::const_iterator test_it;
   std::vector <std::vector <double>> * pd_distances = nullptr;
   std::vector <std::vector <double>> * anticipated_distances = nullptr;
+  std::vector <std::vector <double>> * ant_probabilities = nullptr;
   std::vector <std::vector<struct CompoundLoop>> * loop_table = nullptr;
   std::list <struct Transition> * best_transitions = nullptr;
   std::vector <double> * weights = nullptr;
@@ -102,21 +112,35 @@ int main(int argc, char ** argv)
     {
       weights = filter_weights(tap_filter * 2);
       pd_distances = preserve_dynamics2(*distances, *weights);
+      if (show_pd_matrix)
+      {
+        display_distance_matrix(*pd_distances);
+        continue;
+      } // if
       delete weights;
     } // if
 
     if (anticipate_future_cost)
     {
       anticipated_distances = anticipate_future(*pd_distances);
+      if (show_anticipated_matrix)
+      {
+        display_distance_matrix(*anticipated_distances);
+        continue;
+      } // if
+      ant_probabilities = probability_matrix(
+        *anticipated_distances, 2 * average_distance(*anticipated_distances));
+      normalise_probabilities(*ant_probabilities);
       delete pd_distances;
+      delete anticipated_distances;
     } // if
 
     if (prune_transitions)
     {
-      select_only_local_maxima2(*anticipated_distances);
+      select_only_local_maxima2(*ant_probabilities);
       best_transitions = lowest_average_cost_transitions(
-        *anticipated_distances, 40);
-      delete anticipated_distances;
+        *ant_probabilities, 40);
+      delete ant_probabilities;
     } // if
 
     boost::filesystem::create_directory(output_file_path + "/" + output_name());
@@ -210,14 +234,6 @@ int main(int argc, char ** argv)
     delete loop_table;
   } // for
 
-  /**
-  std::vector <std::vector <double>> * probabilities =
-    probability_matrix(*distances, 3 * average_distance(*distances));
-  normalise_probabilities(*probabilities);
-  //display_transition_matrix(*probabilities);
-  display_distance_matrix(*distances);
-  **/
-
   delete input_video;
   return 0;
 } // function main
@@ -272,6 +288,15 @@ bool check_flags(int argc, char ** argv)
         } else if (argv[arg_index][char_index] == 's') // stabilise first
         {
           stabilise = true;
+        } else if (argv[arg_index][char_index] == 'd') // show distance matrix
+        {
+          show_distance_matrix = true;
+        } else if (argv[arg_index][char_index] == 'g') // show preserved dynamics
+        {
+          show_pd_matrix = true;
+        } else if (argv[arg_index][char_index] == 'h') // show anticipated cost
+        {
+          show_anticipated_matrix = true;
         } else if (argv[arg_index][char_index] == 'p')
         {
           prune_transitions = true;
@@ -659,7 +684,14 @@ void display_distance_matrix(std::vector <std::vector <double>> & dist_matrix)
   cv::namedWindow("Display", cv::WINDOW_AUTOSIZE);
   cv::setMouseCallback("Display", on_event, nullptr);
   cv::imshow("Display", *enlarged_image);
-  cv::waitKey(0);
+  int key = 0;
+  while (key = cv::waitKey(60 * 60 * 10))
+  {
+      if (key == 27) // ESC
+      {
+          break;
+      } // if
+  } // while
   delete image;
   delete enlarged_image;
 } // function display_distance_matrix
@@ -857,15 +889,16 @@ void on_event(int event, int x, int y,int flags, void * userdata)
       && y + 1 < (input_video->get_frames().size() - tap_filter) * component_length)
   {
 
-    cv::namedWindow("Source", cv::WINDOW_AUTOSIZE);
+    cv::namedWindow("Source", cv::WINDOW_NORMAL);
     cv::moveWindow("Source", 0, 0);
     cv::imshow("Source",
                input_video->get_frames()[y / component_length + tap_filter]);
 
-    cv::namedWindow("Destination", cv::WINDOW_AUTOSIZE);
+    cv::namedWindow("Destination", cv::WINDOW_NORMAL);
     cv::moveWindow("Destination", input_video->get_frame_width() + 3, 0);
     cv::imshow("Destination",
                input_video->get_frames()[x / component_length + tap_filter]);
+    cv::waitKey(0);
   } // if
 } // function on_mouse_click
 
@@ -1266,8 +1299,10 @@ void display_help()
             << "Set relative weight of future transitions: -w value" << std::endl
             << "Prune transitions: -p" << std::endl
             << "Set number of frames in crossfade: -c value" << std::endl
-            << "Output file name: -o file_name.avi"
-            << std::endl;
+            << "Output file name: -o file_name.avi" << std::endl
+            << "Show distance matrix: -d" << std::endl
+            << "Show distance matrix w/ preserved dynamics: -g" << std::endl
+            << "Show distance matrix w/ PD & anticipated cost: -h" << std::endl;
 } // function display_help
 
 // Gets rid of all transitions but those that are local maxima
@@ -1341,63 +1376,63 @@ void select_only_local_maxima(
 } // function select_only_local_maxima
 
 void select_only_local_maxima2(
-  std::vector <std::vector <double>> & dist_matrix)
+  std::vector <std::vector <double>> & prob_matrix)
 {
   std::cout << "Pruning the set of possible transitions..." << std::endl;
 
-  double max_distance = maximum_component_value <double> (dist_matrix);
-  int square_size = dist_matrix.size() / 10;
+  //double max_distance = maximum_component_value <double> (dist_matrix);
+  int square_size = prob_matrix.size() / 10;
   int sqr_start_row = 0, sqr_start_col = 0;
-  double sqr_min_row = 0, sqr_min_col = 0;
+  double sqr_max_row = 0, sqr_max_col = 0;
   int end_row = 0, end_col = 0;
 
-  // Set the diagonal to the maximal distance so it is not considered
-  for (int index = 0; index < dist_matrix.size(); index++)
+  // Set the diagonal to the minimum probability
+  for (int index = 0; index < prob_matrix.size(); index++)
   {
-    dist_matrix[index][index] = max_distance;
+    prob_matrix[index][index] = 0;
   } // for
 
   while (true)
   {
-    sqr_min_row = sqr_start_row;
-    sqr_min_col = sqr_start_col;
-    end_row = sqr_start_row + square_size + dist_matrix.size() % 10;
-    end_col = sqr_start_col + square_size + dist_matrix.size() % 10;
+    sqr_max_row = sqr_start_row;
+    sqr_max_col = sqr_start_col;
+    end_row = sqr_start_row + square_size + prob_matrix.size() % 10;
+    end_col = sqr_start_col + square_size + prob_matrix.size() % 10;
 
-    // Find minimum distance in the square region
+    // Find maximum probability in the square region
     for (int sqr_row = sqr_start_row;
-         sqr_row < end_row && sqr_row < dist_matrix.size(); sqr_row++)
+         sqr_row < end_row && sqr_row < prob_matrix.size(); sqr_row++)
     {
       for (int sqr_col = sqr_start_col;
-           sqr_col < end_col && sqr_col < dist_matrix.size(); sqr_col++)
+           sqr_col < end_col && sqr_col < prob_matrix.size(); sqr_col++)
       {
-        if (dist_matrix[sqr_row][sqr_col]
-            < dist_matrix[sqr_min_row][sqr_min_col])
+        if (prob_matrix[sqr_row][sqr_col]
+            > prob_matrix[sqr_max_row][sqr_max_col])
         {
-          sqr_min_row = sqr_row;
-          sqr_min_col = sqr_col;
+          sqr_max_row = sqr_row;
+          sqr_max_col = sqr_col;
         } // if
       } // for
     } // for
 
-    // Set all non-minimal distances to the maximum distance
+    // Set all non-maximal probabilities to zero
     for (int sqr_row = sqr_start_row;
-         sqr_row < end_row && sqr_row < dist_matrix.size(); sqr_row++)
+         sqr_row < end_row && sqr_row < prob_matrix.size(); sqr_row++)
     {
       for (int sqr_col = sqr_start_col;
-           sqr_col < end_col && sqr_col < dist_matrix.size(); sqr_col++)
+           sqr_col < end_col && sqr_col < prob_matrix.size(); sqr_col++)
       {
-        if (sqr_row != sqr_min_row || sqr_col != sqr_min_col)
+        if (sqr_row != sqr_max_row || sqr_col != sqr_max_col)
         {
-          dist_matrix[sqr_row][sqr_col] = max_distance;
+          prob_matrix[sqr_row][sqr_col] = 0;
         } // of
       } // for
     } // for
 
-    if (end_col < dist_matrix.size())
+    if (end_col < prob_matrix.size())
     {
       sqr_start_col = end_col;
-    } else if (end_row < dist_matrix.size())
+    } else if (end_row < prob_matrix.size())
     {
       sqr_start_row = end_row;
       sqr_start_col = 0;
@@ -1407,14 +1442,14 @@ void select_only_local_maxima2(
     } // else
   } // while
 
-  // Remove (by maximising) the half of the matrix above the identical
-  for (int row_index = 0; row_index < dist_matrix.size(); row_index++)
+  // Remove (by setting to zero) the half of the matrix above the identical
+  for (int row_index = 0; row_index < prob_matrix.size(); row_index++)
   {
-    for (int col_index = 0; col_index < dist_matrix.size(); col_index++)
+    for (int col_index = 0; col_index < prob_matrix.size(); col_index++)
     {
       if (col_index <= row_index - 5)
       {
-        dist_matrix[row_index][col_index] = max_distance;
+        prob_matrix[row_index][col_index] = 0;
       } // if
     } // for
   } // for
@@ -1458,23 +1493,22 @@ void threshold_matrix(std::vector <std::vector <double>> & matrix, bool below,
 // Calculate the average cost for each transition and returns a list of those
 // with the lowest average cost
 std::list <struct Transition> * lowest_average_cost_transitions(
-  std::vector <std::vector <double>> & dist_matrix, int max_remaining)
+  std::vector <std::vector <double>> & prob_matrix, int max_remaining)
 {
   std::cout << "Sorting transitions based on average cost..." << std::endl;
 
-  double max_distance = maximum_component_value <double> (dist_matrix);
+  //double max_distance = maximum_component_value <double> (dist_matrix);
   std::list <struct Transition> transitions;
   std::list <struct Transition> * best_transitions =
     new std::list <struct Transition> ();
   struct Transition * current_transition = nullptr;
 
   // Calculates average cost for all remaining transitions
-  for (int row_index = 0; row_index < dist_matrix.size(); row_index++)
+  for (int row_index = 0; row_index < prob_matrix.size(); row_index++)
   {
-    for (int col_index = 0; col_index < dist_matrix.size(); col_index++)
+    for (int col_index = 0; col_index < prob_matrix.size(); col_index++)
     {
-      if (dist_matrix[row_index][col_index] >= max_distance
-          || dist_matrix[row_index][col_index] <= 0)
+      if (prob_matrix[row_index][col_index] <= 0)
       {
         continue;
       } // if
@@ -1488,7 +1522,7 @@ std::list <struct Transition> * lowest_average_cost_transitions(
         current_transition->source = col_index;
         current_transition->destination = row_index;
       } // else
-      current_transition->average_cost = dist_matrix[row_index][col_index];
+      current_transition->average_cost = prob_matrix[row_index][col_index];
       transitions.push_back(*current_transition);
     } // for
   } // for
@@ -1507,12 +1541,12 @@ std::list <struct Transition> * lowest_average_cost_transitions(
   return best_transitions;
 } // function lowest_average_cost_transitions
 
-// Given two transitions, returns true if the first is less than or equal to the
+// Given two transitions, returns true if the first is greater than the
 // second, or false otherwise.
 bool compare_transitions(struct Transition & first,
                          struct Transition & second)
 {
-  return first.average_cost <= second.average_cost;
+  return first.average_cost > second.average_cost;
 } // function compare_transitions
 
 // Utility function which creates and returns a vector containing all of the
